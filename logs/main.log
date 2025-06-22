@@ -1,0 +1,66 @@
+[2025-06-22 22:14:34,775] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:14:34,966] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-22 22:14:34,969] [CRITICAL] [Main] - Configuration validation failed.
+[2025-06-22 22:15:32,743] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:15:32,820] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-22 22:15:32,822] [CRITICAL] [Main] - Configuration validation failed.
+[2025-06-22 22:33:32,178] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:33:32,249] [CRITICAL] [Main] - Config initialization failed
+Traceback (most recent call last):
+  File "C:\Games\Post_Telegram_RAG_LM_Studio\Post_Telegram_RAG_LM_Studio_World\project_root_5\modules\utils\config_manager.py", line 20, in load_config
+    self.config = json.load(file)
+                  ~~~~~~~~~^^^^^^
+  File "C:\Program Files\Python313\Lib\json\__init__.py", line 293, in load
+    return loads(fp.read(),
+        cls=cls, object_hook=object_hook,
+        parse_float=parse_float, parse_int=parse_int,
+        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)
+  File "C:\Program Files\Python313\Lib\json\__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Program Files\Python313\Lib\json\decoder.py", line 344, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\Python313\Lib\json\decoder.py", line 360, in raw_decode
+    obj, end = self.scan_once(s, idx)
+               ~~~~~~~~~~~~~~^^^^^^^^
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 12 column 40 (char 355)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Games\Post_Telegram_RAG_LM_Studio\Post_Telegram_RAG_LM_Studio_World\project_root_5\main.py", line 65, in __init__
+    self.config_manager = ConfigManager(config_path)
+                          ~~~~~~~~~~~~~^^^^^^^^^^^^^
+  File "C:\Games\Post_Telegram_RAG_LM_Studio\Post_Telegram_RAG_LM_Studio_World\project_root_5\modules\utils\config_manager.py", line 13, in __init__
+    self.load_config()
+    ~~~~~~~~~~~~~~~~^^
+  File "C:\Games\Post_Telegram_RAG_LM_Studio\Post_Telegram_RAG_LM_Studio_World\project_root_5\modules\utils\config_manager.py", line 24, in load_config
+    raise ValueError("Invalid JSON format in configuration") from e
+ValueError: Invalid JSON format in configuration
+[2025-06-22 22:36:26,326] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:36:26,350] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:07"}
+[2025-06-22 22:36:26,353] [CRITICAL] [Main] - Configuration validation failed.
+[2025-06-22 22:40:15,739] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:40:15,787] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-22 22:40:15,789] [CRITICAL] [Main] - Configuration validation failed.
+[2025-06-22 22:42:05,391] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:42:05,414] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-22 22:42:05,417] [CRITICAL] [Main] - Configuration validation failed.
+[2025-06-22 22:42:46,694] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:42:46,717] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-22 22:42:46,719] [CRITICAL] [Main] - Configuration validation failed.
+[2025-06-22 22:45:49,191] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:45:49,215] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:07"}
+[2025-06-22 22:45:49,217] [INFO] [Main] - Configuration validated successfully.
+[2025-06-22 22:46:03,683] [INFO] [Main] - System starting up...
+[2025-06-22 22:46:15,938] [INFO] [Main] - Initial RAG knowledge base built.
+[2025-06-22 22:46:15,939] [INFO] [Main] - No more topics to process.
+[2025-06-22 22:46:15,940] [INFO] [Main] - System shut down gracefully.
+[2025-06-22 22:54:16,535] [INFO] [Main] - 🚀 Initializing TelegramRAGSystem...
+[2025-06-22 22:54:16,602] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-22 22:54:16,604] [INFO] [Main] - Configuration validated successfully.
+[2025-06-22 22:54:29,956] [INFO] [Main] - System starting up...
+[2025-06-22 22:54:40,901] [INFO] [Main] - Initial RAG knowledge base built.
+[2025-06-22 22:54:40,914] [INFO] [Main] - No more topics to process.
+[2025-06-22 22:54:40,915] [INFO] [Main] - System shut down gracefully.
