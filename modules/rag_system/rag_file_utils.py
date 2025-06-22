@@ -103,3 +103,18 @@ class RAGFileUtils:
             }
             for r in results if not r.get("success")
         ]
+
+class FileProcessor:
+    """
+    Адаптер между RAGRetriever и RAGFileUtils.
+    """
+    def __init__(self):
+        self.utils = RAGFileUtils()
+
+    def extract_text_from_file(self, file_path: str) -> str:
+        result = self.utils.extract_text(file_path)
+        return result.get("text", "")
+
+    def validate_file(self, file_path: str) -> bool:
+        supported = self.utils.get_supported_extensions()
+        return any(file_path.lower().endswith(ext) for ext in supported)
