@@ -1,5 +1,3 @@
-# modules/utils/logs.py
-
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -12,6 +10,9 @@ LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
 def setup_logger(name: str, log_file: str, level=logging.INFO) -> logging.Logger:
+    """
+    Создать и вернуть логгер с файловым и консольным обработчиком.
+    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
@@ -21,12 +22,14 @@ def setup_logger(name: str, log_file: str, level=logging.INFO) -> logging.Logger
 
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
-
-        logger.propagate = False  # не передаём в root
+        logger.propagate = False  # Не передаём в root
 
     return logger
 
 def setup_file_handler(log_file: str, level=logging.INFO) -> RotatingFileHandler:
+    """
+    Создать файловый обработчик с ротацией.
+    """
     file_path = LOG_DIR / log_file
     handler = RotatingFileHandler(
         filename=file_path,
@@ -40,6 +43,9 @@ def setup_file_handler(log_file: str, level=logging.INFO) -> RotatingFileHandler
     return handler
 
 def setup_console_handler(level=logging.INFO) -> logging.StreamHandler:
+    """
+    Создать консольный обработчик логов.
+    """
     console = logging.StreamHandler()
     formatter = logging.Formatter('[%(levelname)s] %(message)s')
     console.setFormatter(formatter)
@@ -47,11 +53,17 @@ def setup_console_handler(level=logging.INFO) -> logging.StreamHandler:
     return console
 
 def get_logger(name: str) -> logging.Logger:
+    """
+    Получить логгер с файловым и консольным выводом.
+    """
     return setup_logger(name, f"{name.lower()}.log")
 
 # ----------------------------- SYSTEM METRICS -----------------------------
 
 def log_system_info(logger: logging.Logger):
+    """
+    Логировать информацию о системе (платформа, память, CPU, аптайм).
+    """
     info = {
         "platform": platform.platform(),
         "cpu_count": psutil.cpu_count(),
@@ -61,12 +73,25 @@ def log_system_info(logger: logging.Logger):
     logger.info(f"System Info: {json.dumps(info)}")
 
 def log_processing_stats(topics_processed: int, errors: int, success_rate: float, logger: logging.Logger):
-    logger.info(f"Processing Stats | Topics: {topics_processed}, Errors: {errors}, Success Rate: {success_rate:.2f}")
+    """
+    Логировать статистику обработки тем.
+    """
+    logger.info(
+        f"Processing Stats | Topics: {topics_processed}, Errors: {errors}, Success Rate: {success_rate:.2f}"
+    )
 
 def log_rag_performance(retrieval_time: float, context_length: int, logger: logging.Logger):
-    logger.debug(f"RAG | Time: {retrieval_time:.2f}s, Context length: {context_length} chars")
+    """
+    Логировать производительность RAG поиска.
+    """
+    logger.debug(
+        f"RAG | Time: {retrieval_time:.2f}s, Context length: {context_length} chars"
+    )
 
 def log_telegram_status(message_sent: bool, logger: logging.Logger, error_details: str = None):
+    """
+    Логировать статус отправки сообщения в Telegram.
+    """
     if message_sent:
         logger.info("Telegram message sent successfully.")
     else:

@@ -1,5 +1,3 @@
-# main.py
-
 import sys
 import signal
 import time
@@ -16,7 +14,48 @@ from modules.content_generation.lm_client import LMStudioClient
 from modules.content_generation.prompt_builder import PromptBuilder
 from modules.content_generation.content_validator import ContentValidator
 
+class MonitoringService:
+    """
+    Сервис отслеживания статистики обработки тем, публикаций и ошибок.
+    """
+    def __init__(self, logger):
+        self.topics_processed = 0
+        self.topics_failed = 0
+        self.logger = logger
+
+    def log_success(self, topic):
+        self.topics_processed += 1
+        self.logger.info(f"[MONITOR] Topic processed: {topic}")
+
+    def log_failure(self, topic, error):
+        self.topics_failed += 1
+        self.logger.error(f"[MONITOR] Topic failed: {topic}, error: {error}")
+
+    def report(self):
+        self.logger.info(f"[MONITOR] Stats: Success: {self.topics_processed}, Failed: {self.topics_failed}")
+
+class RAGIngestionService:
+    """
+    Сервис построения и обновления базы знаний RAG.
+    """
+    def __init__(self, rag_retriever, logger):
+        self.rag_retriever = rag_retriever
+        self.logger = logger
+
+    def build_knowledge_base(self, folder):
+        try:
+            self.rag_retriever.process_inform_folder(folder)
+            self.rag_retriever.build_knowledge_base()
+            self.logger.info("Initial RAG knowledge base built.")
+        except Exception as e:
+            self.logger.error("Knowledge base build failed", exc_info=True)
+            raise
+
 class TelegramRAGSystem:
+    """
+    Главный класс системы автопостинга с RAG и LM Studio.
+    Управляет жизненным циклом, координирует обработку, отвечает за интеграцию компонентов.
+    """
     def __init__(self, config_path: str = "config/config.json"):
         self.logger = get_logger("Main")
         self.logger.info("🚀 Initializing TelegramRAGSystem...")
@@ -29,7 +68,9 @@ class TelegramRAGSystem:
             self.logger.critical("Config initialization failed", exc_info=True)
             sys.exit(1)
 
-        self.initialize_components()
+        self.setup_logging()
+        self.validate_configuration()
+        self.initialize_services()
 
     def setup_logging(self):
         log_system_info(self.logger)
@@ -40,14 +81,13 @@ class TelegramRAGSystem:
             sys.exit(1)
         self.logger.info("Configuration validated successfully.")
 
-    def initialize_components(self):
-        self.setup_logging()
-        self.validate_configuration()
-
+    def initialize_services(self):
         try:
-            # Инициализация RAG и состояния
+            # RAG и состояние
             self.rag_retriever = RAGRetriever(config=self.config["rag"])
             self.state_manager = StateManager(state_file="data/state.json")
+            self.monitoring = MonitoringService(self.logger)
+            self.ingestion = RAGIngestionService(self.rag_retriever, self.logger)
 
             # Генерация контента
             self.lm_client = LMStudioClient(
@@ -71,16 +111,7 @@ class TelegramRAGSystem:
             self.logger.critical("Component initialization failed", exc_info=True)
             sys.exit(1)
 
-    def build_initial_knowledge_base(self):
-        try:
-            folder = self.config["rag"].get("inform_folder", "inform/")
-            self.rag_retriever.process_inform_folder(folder)
-            self.rag_retriever.build_knowledge_base()
-            self.logger.info("Initial RAG knowledge base built.")
-        except Exception as e:
-            self.logger.error("Knowledge base build failed", exc_info=True)
-
-    def graceful_shutdown(self):
+    def graceful_shutdown(self, *_):
         self.shutdown_requested = True
         self.logger.warning("Shutdown signal received. Exiting loop...")
 
@@ -91,6 +122,7 @@ class TelegramRAGSystem:
         return topic
 
     def combine_contexts(self, rag_context: str, web_context: str) -> str:
+        # Можно расширить логику объединения (например, склейка по длине)
         return f"{rag_context}\n\n[Доп. контекст из поиска]\n\n{web_context}"
 
     def update_processing_state(self, topic: str, success: bool):
@@ -100,6 +132,7 @@ class TelegramRAGSystem:
     def handle_error(self, topic: str, error: Exception):
         self.logger.error(f"Error processing topic '{topic}': {str(error)}", exc_info=True)
         self.update_processing_state(topic, success=False)
+        self.monitoring.log_failure(topic, error)
 
     def main_processing_loop(self):
         while not self.shutdown_requested:
@@ -111,17 +144,22 @@ class TelegramRAGSystem:
             try:
                 # 1. Поиск контекста в RAG
                 rag_context = self.rag_retriever.retrieve_context(topic)
+                if not rag_context or not rag_context.strip():
+                    raise ValueError("RAG context is empty for topic")
 
                 # 2. Web-поиск дополнительной информации
-                web_context = self.web_search.extract_content(
-                    self.web_search.search(topic)
-                )
+                web_results = self.web_search.search(topic)
+                web_context = self.web_search.extract_content(web_results)
+                # (Можно добавить фильтрацию релевантности web_context)
 
-                # 3. Объединение контекста
+                # 3. Объединение контекстов
                 full_context = self.combine_contexts(rag_context, web_context)
 
                 # 4. Выбор медиафайла (опционально)
                 media_file = self.media_handler.get_random_media_file()
+                if media_file and not self.media_handler.validate_media_file(media_file):
+                    self.logger.warning(f"Media file {media_file} is not valid. Skipping media.")
+                    media_file = None
 
                 # 5. Сборка промпта
                 prompt = self.prompt_builder.build_prompt(
@@ -129,21 +167,39 @@ class TelegramRAGSystem:
                     context=full_context,
                     media_file=media_file
                 )
+                if not prompt or not prompt.strip():
+                    raise ValueError("Prompt building failed (empty prompt)")
 
                 # 6. Генерация контента
                 content = self.lm_client.generate_content(prompt)
+                if not content or not content.strip():
+                    raise ValueError("Generated content is empty")
 
-                # 7. Валидация
+                # 7. Валидация контента
                 validated_content = self.content_validator.validate_content(content, has_media=bool(media_file))
+                if not validated_content or not validated_content.strip():
+                    raise ValueError("Validated content is empty")
 
-                # 8. Публикация в Telegram
-                success = self.telegram_client.send_media_message(validated_content, media_file) \
-                          if media_file else self.telegram_client.send_text_message(validated_content)
-
-                # 9. Состояние
+                # 8. Публикация в Telegram с повтором (retry)
+                success = False
+                for attempt in range(1, self.config["telegram"].get("max_retries", 3) + 1):
+                    try:
+                        if media_file:
+                            success = self.telegram_client.send_media_message(validated_content, media_file)
+                        else:
+                            success = self.telegram_client.send_text_message(validated_content)
+                        if success:
+                            break
+                    except Exception as te:
+                        self.logger.error(f"Telegram send failed (attempt {attempt}): {te}")
+                        time.sleep(2)
                 self.update_processing_state(topic, success)
+                if success:
+                    self.monitoring.log_success(topic)
+                else:
+                    self.monitoring.log_failure(topic, "Telegram send failed")
 
-                # 10. Пауза
+                self.monitoring.report()
                 time.sleep(self.config["telegram"]["post_interval"])
 
             except Exception as e:
@@ -152,9 +208,16 @@ class TelegramRAGSystem:
 
     def run(self):
         self.logger.info("System starting up...")
-        signal.signal(signal.SIGINT, lambda s, f: self.graceful_shutdown())
-        signal.signal(signal.SIGTERM, lambda s, f: self.graceful_shutdown())
+        # Корректная обработка shutdown-сигналов
+        signal.signal(signal.SIGINT, self.graceful_shutdown)
+        signal.signal(signal.SIGTERM, self.graceful_shutdown)
 
-        self.build_initial_knowledge_base()
+        # Построение базы знаний RAG
+        self.ingestion.build_knowledge_base(self.config["rag"].get("inform_folder", "inform/"))
+        # Основной цикл
         self.main_processing_loop()
         self.logger.info("System shut down gracefully.")
+
+if __name__ == "__main__":
+    system = TelegramRAGSystem()
+    system.run()

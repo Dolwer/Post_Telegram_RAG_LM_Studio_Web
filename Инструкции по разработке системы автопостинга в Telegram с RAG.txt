@@ -3,64 +3,70 @@
  Разработать Python-приложение для автоматического создания и публикации контента в Telegram
 канал с использованием RAG-системы (Retrieval-Augmented Generation) и локальной языковой
  модели через LM Studio.
+
  Архитектура системы
  Структура проекта
+
  project_root/
- ├── main.py                        
-├── logs.py                        
+├── main.py
+├── logs.py
 ├── config/
- │   ├── config.json               
-│   ├── telegram_token.txt        
-│   └── telegram_channel.txt      
+│   ├── config.json
+│   ├── telegram_token.txt
+│   └── telegram_channel.txt
 ├── data/
- │   ├── prompt_1/                 
-│   ├── prompt_2/                 
-│   ├── prompt_3/                 
-│   ├── topics.txt               
-│   └── state.json               
-├── inform/                       
-├── media/                        
+│   ├── prompt_1/
+│   ├── prompt_2/
+│   ├── prompt_3/
+│   ├── topics.txt
+│   └── state.json
+├── inform/
+├── media/
 ├── modules/
- │   ├── rag_system/
- │   │   ├── rag_retriever.py     
-│   │   ├── rag_file_utils.py    
-# Точка входа, управление жизненным циклом
- # Централизованное логирование
- # Основная конфигурация
- # Токен Telegram-бота
- # ID канала
- # Шаблоны первой части промпта
- # Шаблоны второй части промпта
- # Шаблоны третьей части промпта
- # Список тем для обработки
- # Состояние системы
- # База знаний для RAG
- # Медиафайлы для публикации
- # Гибридный поиск и индексация
- # Извлечение текста из файлов
- │   │   ├── rag_chunk_tracker.py # Трекинг использования чанков
- │   │   └── embedding_manager.py  # Управление embedding-моделью
- │   ├── content_generation/
- │   │   ├── prompt_builder.py    
-# Сборка промптов
- │   │   ├── lm_client.py         
-# Клиент для LM Studio
- │   │   └── content_validator.py # Валидация контента
- │   ├── external_apis/
- │   │   ├── web_search.py        
-# Интеграция с serper.dev
- │   │   └── telegram_client.py   # Публикация в Telegram
- │   └── utils/
- │       
-│       
-│       
-├── config_manager.py    
-├── file_processor.py    
-└── media_handler.py     
-# Управление конфигурацией
- # Обработка файлов разных форматов
- # Работа с медиафайлами
- └── requirements.txt
+│   ├── rag_system/
+│   │   ├── embedding_manager.py           # Менеджер эмбеддингов
+│   │   ├── file_processor_manager.py      # Менеджер парсеров и хуков
+│   │   ├── hook_manager.py                # Менеджер хуков (SOLID, meta, error handling)
+│   │   ├── rag_file_utils.py              # Высокоуровневая обёртка для batch/аналитики
+│   │   ├── rag_retriever.py               # Индексация и поиск по базе знаний
+│   │   ├── file_processors/               # Парсеры по форматам файлов
+│   │   │   ├── rag_txt.py
+│   │   │   ├── rag_csv.py
+│   │   │   ├── rag_excel.py
+│   │   │   ├── rag_pdf.py
+│   │   │   ├── rag_docx.py
+│   │   │   ├── rag_html.py
+│   │   │   ├── rag_markdown.py
+│   │   │   ├── rag_json.py
+│   │   │   ├── rag_pptx.py
+│   │   │   ├── rag_audio.py
+│   │   │   ├── rag_video.py
+│   │   │   ├── rag_fallback_textract.py
+│   │   │   └── __init__.py
+│   │   └── hooks/                         # Хуки для очистки/нормализации
+│   │       ├── base.py
+│   │       ├── lower_case.py
+│   │       ├── remove_stopwords.py
+│   │       ├── remove_punctuation.py
+│   │       ├── strip_html.py
+│   │       ├── strip_markdown.py
+│   │       ├── remove_empty_lines.py
+│   │       ├── remove_extra_spaces.py
+│   │       ├── custom_replace.py
+│   │       └── __init__.py
+│   ├── content_generation/
+│   │   ├── prompt_builder.py
+│   │   ├── lm_client.py
+│   │   └── content_validator.py
+│   ├── external_apis/
+│   │   ├── web_search.py
+│   │   └── telegram_client.py
+│   └── utils/
+│       ├── config_manager.py
+│       ├── file_processor.py
+│       └── media_handler.py
+└── requirements.txt
+
 Детальное техническое задание
  1. Инициализация и конфигурация
  1.1 Создание config_manager.py
