@@ -2,6 +2,7 @@ import sys
 import signal
 import time
 import logging
+import os
 
 from modules.utils.config_manager import ConfigManager
 from modules.utils.logs import get_logger, log_system_info
@@ -71,6 +72,7 @@ class TelegramRAGSystem:
         self.setup_logging()
         self.validate_configuration()
         self.initialize_services()
+        self.autoload_topics()  # --- Добавлено для автозагрузки тем ---
 
     def setup_logging(self):
         log_system_info(self.logger)
@@ -95,12 +97,22 @@ class TelegramRAGSystem:
                 model=self.config["lm_studio"]["model"],
                 config=self.config["lm_studio"]
             )
-            self.prompt_builder = PromptBuilder(prompt_folders=["data/prompt_1", "data/prompt_2", "data/prompt_3"])
+            self.prompt_builder = PromptBuilder(prompt_folders=self.config["paths"].get("prompt_folders", [
+                "data/prompt_1", "data/prompt_2", "data/prompt_3"
+            ]))
             self.content_validator = ContentValidator(config=self.config)
 
             # Веб-поиск и медиа
-            self.web_search = WebSearchClient(api_key=self.config["serper"].get("api_key", ""), config=self.config["serper"])
-            self.media_handler = MediaHandler(media_folder="media", config=self.config)
+            serper_api_key = self.config_manager.get_serper_api_key()
+            serper_endpoint = self.config_manager.get_config_value("serper.endpoint", "https://google.serper.dev/search")
+            serper_results_limit = self.config_manager.get_config_value("serper.results_limit", 10)
+            self.web_search = WebSearchClient(
+                api_key=serper_api_key,
+                endpoint=serper_endpoint,
+                results_limit=serper_results_limit
+            )
+            self.media_handler = MediaHandler(media_folder=self.config["paths"].get("media_dir", "media"),
+                                             config=self.config)
 
             # Telegram клиент
             token = self.config_manager.get_telegram_token()
@@ -111,6 +123,33 @@ class TelegramRAGSystem:
             self.logger.critical("Component initialization failed", exc_info=True)
             sys.exit(1)
 
+    def autoload_topics(self):
+        """
+        Автоматически загружает темы из data/topics.txt и добавляет их в StateManager,
+        если они ещё не обработаны или не находятся в ошибочных.
+        """
+        topics_file = "data/topics.txt"
+        if not os.path.isfile(topics_file):
+            self.logger.warning(f"Topics file not found: {topics_file}")
+            return
+
+        try:
+            with open(topics_file, "r", encoding="utf-8") as f:
+                topics = [line.strip() for line in f if line.strip()]
+            # Собираем все уже известные темы
+            existing = set(self.state_manager.get_unprocessed_topics() +
+                           self.state_manager.get_processed_topics() +
+                           self.state_manager.get_failed_topics())
+            # Фильтруем только новые темы
+            new_topics = [t for t in topics if t not in existing]
+            if new_topics:
+                self.logger.info(f"Autoloading {len(new_topics)} new topics into queue")
+                self.state_manager.add_topics(new_topics)
+            else:
+                self.logger.info("No new topics found to autoload")
+        except Exception as e:
+            self.logger.error("Failed to autoload topics", exc_info=True)
+
     def graceful_shutdown(self, *_):
         self.shutdown_requested = True
         self.logger.warning("Shutdown signal received. Exiting loop...")
@@ -119,47 +158,70 @@ class TelegramRAGSystem:
         topic = self.state_manager.get_next_unprocessed_topic()
         if topic:
             self.logger.info(f"Next topic selected: {topic}")
+        else:
+            self.logger.info("No more topics to process.")
         return topic
 
     def combine_contexts(self, rag_context: str, web_context: str) -> str:
-        # Можно расширить логику объединения (например, склейка по длине)
+        if not rag_context and not web_context:
+            return ""
+        elif not rag_context:
+            return f"[Web context only]\n\n{web_context}"
+        elif not web_context:
+            return f"{rag_context}\n\n[Нет web-контекста]"
         return f"{rag_context}\n\n[Доп. контекст из поиска]\n\n{web_context}"
 
     def update_processing_state(self, topic: str, success: bool):
-        self.state_manager.mark_topic_processed(topic, success)
-        self.logger.info(f"Topic '{topic}' marked as {'processed' if success else 'failed'}.")
+        try:
+            self.state_manager.mark_topic_processed(topic, success)
+            self.logger.info(f"Topic '{topic}' marked as {'processed' if success else 'failed'}.")
+        except Exception as e:
+            self.logger.error(f"Failed to update state for topic '{topic}': {str(e)}", exc_info=True)
 
     def handle_error(self, topic: str, error: Exception):
-        self.logger.error(f"Error processing topic '{topic}': {str(error)}", exc_info=True)
-        self.update_processing_state(topic, success=False)
-        self.monitoring.log_failure(topic, error)
+        try:
+            self.logger.error(f"Error processing topic '{topic}': {str(error)}", exc_info=True)
+            self.update_processing_state(topic, success=False)
+            self.monitoring.log_failure(topic, error)
+        except Exception as e:
+            self.logger.critical("Failed during error handling!", exc_info=True)
 
     def main_processing_loop(self):
         while not self.shutdown_requested:
             topic = self.get_next_topic()
             if not topic:
-                self.logger.info("No more topics to process.")
                 break
 
             try:
                 # 1. Поиск контекста в RAG
                 rag_context = self.rag_retriever.retrieve_context(topic)
-                if not rag_context or not rag_context.strip():
-                    raise ValueError("RAG context is empty for topic")
+                if rag_context is None:
+                    raise ValueError("RAG context retrieval returned None")
+                if not rag_context.strip():
+                    self.logger.warning(f"RAG context is empty for topic: {topic}")
 
                 # 2. Web-поиск дополнительной информации
                 web_results = self.web_search.search(topic)
+                if web_results is None:
+                    raise ValueError("Web search returned None")
                 web_context = self.web_search.extract_content(web_results)
-                # (Можно добавить фильтрацию релевантности web_context)
+                if not web_context.strip():
+                    self.logger.warning(f"Web context is empty for topic: {topic}")
 
                 # 3. Объединение контекстов
                 full_context = self.combine_contexts(rag_context, web_context)
+                if not full_context.strip():
+                    raise ValueError("Combined context is empty")
 
                 # 4. Выбор медиафайла (опционально)
-                media_file = self.media_handler.get_random_media_file()
-                if media_file and not self.media_handler.validate_media_file(media_file):
-                    self.logger.warning(f"Media file {media_file} is not valid. Skipping media.")
-                    media_file = None
+                media_file = None
+                try:
+                    media_file = self.media_handler.get_random_media_file()
+                    if media_file and not self.media_handler.validate_media_file(media_file):
+                        self.logger.warning(f"Media file {media_file} is not valid. Skipping media.")
+                        media_file = None
+                except Exception as e:
+                    self.logger.warning(f"Media handler error: {str(e)}")
 
                 # 5. Сборка промпта
                 prompt = self.prompt_builder.build_prompt(
@@ -182,7 +244,8 @@ class TelegramRAGSystem:
 
                 # 8. Публикация в Telegram с повтором (retry)
                 success = False
-                for attempt in range(1, self.config["telegram"].get("max_retries", 3) + 1):
+                max_retries = self.config["telegram"].get("max_retries", 3)
+                for attempt in range(1, max_retries + 1):
                     try:
                         if media_file:
                             success = self.telegram_client.send_media_message(validated_content, media_file)
@@ -213,7 +276,11 @@ class TelegramRAGSystem:
         signal.signal(signal.SIGTERM, self.graceful_shutdown)
 
         # Построение базы знаний RAG
-        self.ingestion.build_knowledge_base(self.config["rag"].get("inform_folder", "inform/"))
+        try:
+            self.ingestion.build_knowledge_base(self.config["rag"].get("inform_folder", "inform/"))
+        except Exception as e:
+            self.logger.critical(f"Failed to build RAG knowledge base: {e}", exc_info=True)
+            sys.exit(1)
         # Основной цикл
         self.main_processing_loop()
         self.logger.info("System shut down gracefully.")

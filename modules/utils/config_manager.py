@@ -35,11 +35,11 @@ class ConfigManager:
             return default
 
     def get_telegram_token(self) -> str:
-        token_path = Path("config/telegram_token.txt")
+        token_path = Path(self.get_config_value("telegram.bot_token_file", "config/telegram_token.txt"))
         return self._read_text_file(token_path, "Telegram Token")
 
     def get_telegram_channel_id(self) -> str:
-        channel_path = Path("config/telegram_channel.txt")
+        channel_path = Path(self.get_config_value("telegram.channel_id_file", "config/telegram_channel.txt"))
         return self._read_text_file(channel_path, "Telegram Channel ID")
 
     def get_lm_studio_config(self) -> dict:
@@ -49,7 +49,31 @@ class ConfigManager:
         return self.get_config_value("rag", {})
 
     def get_serper_api_key(self) -> str:
-        return self.get_config_value("serper.api_key", "")
+        """Получает ключ Serper API из config.json или файла, согласно структуре."""
+        # 1. Новый стиль: external_apis.serper.api_key
+        key = self.get_config_value("external_apis.serper.api_key", None)
+        if key:
+            return key
+        # 2. Старый стиль: external_apis["serper.api_key"]
+        key = self.get_config_value("external_apis.serper.api_key", None)
+        if key:
+            return key
+        # 3. Через файл: serper.api_key_file
+        api_key_file = self.get_config_value("serper.api_key_file", None)
+        if api_key_file:
+            try:
+                return self._read_text_file(Path(api_key_file), "Serper API Key")
+            except FileNotFoundError:
+                self.logger.error(f"Serper API key file not found: {api_key_file}")
+        # 4. Через файл: external_apis.serper.api_key_file
+        api_key_file = self.get_config_value("external_apis.serper.api_key_file", None)
+        if api_key_file:
+            try:
+                return self._read_text_file(Path(api_key_file), "Serper API Key (external_apis)")
+            except FileNotFoundError:
+                self.logger.error(f"Serper API key file not found: {api_key_file}")
+        self.logger.critical("Serper API key not found in config or file!")
+        return ""
 
     def update_config_value(self, key_path: str, value: Any) -> None:
         keys = key_path.split(".")
@@ -62,7 +86,7 @@ class ConfigManager:
     def save_config(self) -> None:
         try:
             with self.config_path.open("w", encoding="utf-8") as file:
-                json.dump(self.config, file, indent=4)
+                json.dump(self.config, file, indent=4, ensure_ascii=False)
             self.logger.info(f"Configuration saved to {self.config_path}")
         except Exception as e:
             self.logger.exception("Failed to save configuration")
