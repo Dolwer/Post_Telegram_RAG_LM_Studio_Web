@@ -3,7 +3,8 @@ import sys
 import time
 import signal
 import logging
-
+import traceback
+from datetime import datetime
 from modules.utils.logs import get_logger, log_system_info
 from modules.utils.config_manager import ConfigManager
 from modules.utils.state_manager import StateManager
@@ -16,7 +17,7 @@ from modules.content_generation.content_validator import ContentValidator
 from modules.content_generation.lm_client import LMStudioClient
 
 def clean_context(text: str) -> str:
-    """Удаляет мусорные строки из контекста, очищает от 'nan', 'Data too large for file format' и пустых строк."""
+    """Очищает контекст от мусора, nan, пустых строк."""
     lines = text.splitlines()
     cleaned = [
         line for line in lines
@@ -26,11 +27,23 @@ def clean_context(text: str) -> str:
     ]
     return "\n".join(cleaned)
 
+def slugify(text: str, maxlen=64) -> str:
+    import re
+    slug = re.sub(r'[^\w\s-]', '', text).strip().lower()
+    slug = re.sub(r'[-\s]+', '-', slug)
+    return slug[:maxlen]
+
 class TelegramRAGSystem:
     def __init__(self, config_path: str = "config/config.json"):
         self.logger = get_logger("Main")
         self.shutdown_requested = False
-
+        self.stats = {
+            "total": 0,
+            "success": 0,
+            "fail": 0,
+            "skipped": 0,
+            "topics": []
+        }
         try:
             log_system_info(self.logger)
             self.config_manager = ConfigManager(config_path)
@@ -38,7 +51,6 @@ class TelegramRAGSystem:
             self._validate_config()
             self._init_services()
             self._load_topics()
-            # Health check LM Studio
             if not self.lm_client.check_connection():
                 self.logger.critical("LM Studio not available or model not loaded, aborting.")
                 sys.exit(1)
@@ -91,92 +103,185 @@ class TelegramRAGSystem:
         self.logger.warning("Received shutdown signal.")
         self.shutdown_requested = True
 
-    def _combine_context(self, topic: str) -> str:
+    def _combine_context(self, topic: str, topic_logger) -> str:
         """Собирает и очищает объединённый контекст для промпта."""
-        rag = self.rag_retriever.retrieve_context(topic)
-        web_results = self.web_search.search(topic)
-        web = self.web_search.extract_content(web_results)
+        rag, web = "", ""
+        try:
+            rag = self.rag_retriever.retrieve_context(topic)
+            topic_logger.info(f"RAG context:\n{rag[:2000]}")
+        except Exception as e:
+            topic_logger.error(f"Failed to retrieve RAG context: {e}\n{traceback.format_exc()}")
+            rag = ""
+        try:
+            web_results = self.web_search.search(topic)
+            web = self.web_search.extract_content(web_results)
+            topic_logger.info(f"Web search context:\n{web[:2000]}")
+        except Exception as e:
+            topic_logger.error(f"Failed to retrieve web context: {e}\n{traceback.format_exc()}")
+            web = ""
         full_context = f"{rag}\n\n[WEB]\n{web}"
         full_context = clean_context(full_context)
-        self.logger.debug(f"Combined context (truncated): {full_context[:1000]}")
+        topic_logger.debug(f"Combined context (truncated): {full_context[:1000]}")
         return full_context
 
-    def _shorten_if_needed(self, text: str, prompt: str, has_media: bool) -> str:
-        """Если контент слишком длинный — автоматически просит нейросеть сократить его."""
+    def _shorten_if_needed(self, text: str, prompt: str, has_media: bool, topic_logger) -> str:
+        """Если контент слишком длинный — просит нейросеть сократить его."""
         try:
             self.content_validator.validate_content(text, has_media=has_media)
             return text
-        except ValueError:
-            self.logger.warning("Content too long, requesting shortened version...")
+        except ValueError as e:
+            topic_logger.warning(f"Content too long, requesting shortened version... {e}")
             return self.lm_client.request_shorter_version(prompt, current_length=len(text), target_length=1024 if has_media else 4096)
 
-    def _select_and_check_template(self, topic: str, context: str) -> tuple:
-        """
-        Выбирает случайные шаблоны, читает их, возвращает: текст шаблона, media_needed (bool).
-        """
-        template_paths = self.prompt_builder.select_random_templates()
-        template_texts = [self.prompt_builder.read_template_file(path) for path in template_paths]
-        template_combined = "\n\n".join(template_texts).strip()
-        has_uploadfile = "{UPLOADFILE}" in template_combined
-        return template_combined, has_uploadfile, template_paths
+    def _log_topic_step(self, topic_slug, step, msg, level="info"):
+        os.makedirs("logs/topics", exist_ok=True)
+        logfile = os.path.join("logs/topics", f"{topic_slug}.log")
+        with open(logfile, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [{step.upper()}] {msg}\n")
+        getattr(self.logger, level)(f"[{topic_slug}] [{step.upper()}] {msg}")
 
     def _process_topic(self, topic: str) -> bool:
-        self.logger.info(f"Processing topic: {topic}")
+        topic_slug = slugify(topic)
+        topic_logger = logging.getLogger(f"TopicLogger.{topic_slug}")
+        topic_logger.setLevel(logging.DEBUG)
+        # Добавим file handler для топика
+        topic_logfile = os.path.join("logs/topics", f"{topic_slug}.log")
+        os.makedirs(os.path.dirname(topic_logfile), exist_ok=True)
+        if not topic_logger.handlers:
+            fh = logging.FileHandler(topic_logfile, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+            fh.setLevel(logging.DEBUG)
+            topic_logger.addHandler(fh)
+        topic_logger.info(f"=== Processing topic: {topic} ===")
 
-        context = self._combine_context(topic)
-        template_combined, has_uploadfile, template_paths = self._select_and_check_template(topic, context)
-
-        media_file = None
-        if has_uploadfile:
-            media_file = self.media_handler.get_random_media_file()
-            if media_file is None:
-                self.logger.warning("Template requires media, but no media file available. Proceeding without media.")
-        else:
-            self.logger.info("Template does not require media. No media will be attached.")
-
-        # Собираем prompt только после анализа шаблона и определения media
-        prompt = self.prompt_builder.build_prompt(topic, context, media_file if has_uploadfile else None)
-
-        self.logger.debug(f"Prompt (truncated): {prompt[:1500]}")
-        self.logger.debug(f"Media file: {media_file}")
+        self.stats["total"] += 1
+        topic_result = {"topic": topic, "slug": topic_slug, "status": "unknown", "error": "", "timestamp": datetime.now().isoformat()}
 
         try:
+            context = self._combine_context(topic, topic_logger)
+            if not context or not context.strip():
+                msg = "Empty context after RAG/web. Skipping topic."
+                topic_logger.error(msg)
+                topic_result["status"] = "skipped"
+                topic_result["error"] = msg
+                self.stats["skipped"] += 1
+                self.stats["topics"].append(topic_result)
+                return False
+
+            media_file = self.media_handler.get_random_media_file()
+            topic_logger.info(f"Media file selected: {media_file}")
+
+            try:
+                prompt = self.prompt_builder.build_prompt(topic, context, media_file)
+                topic_logger.debug(f"Prompt built (truncated): {prompt[:1500]}")
+            except Exception as e:
+                msg = f"Invalid prompt: {e}"
+                topic_logger.error(msg)
+                topic_result["status"] = "skipped"
+                topic_result["error"] = msg
+                self.stats["skipped"] += 1
+                self.stats["topics"].append(topic_result)
+                return False
+
             # Основная генерация, с fallback на сокращение при ошибке
             for attempt in range(2):
                 try:
                     response = self.lm_client.generate_with_retry(prompt)
+                    if not response or not response.strip():
+                        raise ValueError("Empty response from LM Studio")
+                    if "prediction-error" in response.lower() or "error:" in response.lower():
+                        raise ValueError(f"LM Studio error: {response.strip()[:100]}")
                 except Exception as e:
-                    self.logger.error(f"LM Studio generation error: {e}")
+                    msg = f"LM Studio generation error: {e}"
+                    topic_logger.error(msg)
                     if attempt == 0:
-                        # Fallback: сократить prompt/context и попробовать ещё раз
-                        self.logger.warning("Retrying with shortened prompt/context after error.")
+                        topic_logger.warning("Retrying with shortened prompt/context after error.")
                         context_short = context[:2048]
-                        prompt_short = self.prompt_builder.build_prompt(topic, context_short, media_file if has_uploadfile else None)
-                        response = self.lm_client.generate_with_retry(prompt_short)
+                        try:
+                            prompt_short = self.prompt_builder.build_prompt(topic, context_short, media_file)
+                            response = self.lm_client.generate_with_retry(prompt_short)
+                        except Exception as e2:
+                            msg2 = f"Failed to build/generate with short context: {e2}"
+                            topic_logger.error(msg2)
+                            topic_result["status"] = "fail"
+                            topic_result["error"] = msg2
+                            self.stats["fail"] += 1
+                            self.stats["topics"].append(topic_result)
+                            return False
+                        if not response or not response.strip() or "prediction-error" in response.lower() or "error:" in response.lower():
+                            msg3 = f"LM Studio error on retry: {response.strip() if response else 'empty'}"
+                            topic_logger.error(msg3)
+                            topic_result["status"] = "fail"
+                            topic_result["error"] = msg3
+                            self.stats["fail"] += 1
+                            self.stats["topics"].append(topic_result)
+                            return False
                     else:
-                        raise
+                        topic_result["status"] = "fail"
+                        topic_result["error"] = msg
+                        self.stats["fail"] += 1
+                        self.stats["topics"].append(topic_result)
+                        return False
 
-                self.logger.debug(f"LM Studio response (truncated): {response[:1500]}")
-                # Проверка и сокращение длины при необходимости
-                response = self._shorten_if_needed(response, prompt, has_media=bool(media_file) and has_uploadfile)
-                validated = self.content_validator.validate_content(response, has_media=bool(media_file))
-                formatted = self.content_validator.format_for_telegram(validated)
-                
+                topic_logger.debug(f"LM Studio response (truncated): {response[:1500]}")
+                response = self._shorten_if_needed(response, prompt, has_media=bool(media_file), topic_logger=topic_logger)
+                try:
+                    validated = self.content_validator.validate_content(response, has_media=bool(media_file))
+                except Exception as e:
+                    msg = f"Content validation error: {e}"
+                    topic_logger.error(msg)
+                    topic_result["status"] = "fail"
+                    topic_result["error"] = msg
+                    self.stats["fail"] += 1
+                    self.stats["topics"].append(topic_result)
+                    return False
+
+                formatted = self.content_validator.format_for_telegram(validated, max_len=1024 if media_file else 4096)
+                topic_logger.debug(f"Formatted content for Telegram (truncated): {formatted[:1000]}")
+
                 if media_file:
                     result = self.telegram_client.send_media_message(formatted, media_file)
                 else:
                     result = self.telegram_client.send_text_message(formatted)
 
                 if result:
-                    self.logger.info(f"Topic '{topic}' successfully posted.")
+                    topic_logger.info("Topic successfully posted to Telegram.")
+                    topic_result["status"] = "success"
+                    self.stats["success"] += 1
                 else:
-                    self.logger.error(f"Failed to publish topic '{topic}'.")
+                    msg = "Failed to publish topic to Telegram (API error or content too long)."
+                    topic_logger.error(msg)
+                    topic_result["status"] = "fail"
+                    topic_result["error"] = msg
+                    self.stats["fail"] += 1
 
+                self.stats["topics"].append(topic_result)
                 return result
 
         except Exception as e:
-            self.logger.error(f"Unhandled error on topic '{topic}'", exc_info=True)
+            msg = f"Unhandled error on topic: {e}\n{traceback.format_exc()}"
+            topic_logger.error(msg)
+            topic_result["status"] = "fail"
+            topic_result["error"] = msg
+            self.stats["fail"] += 1
+            self.stats["topics"].append(topic_result)
             return False
+
+    def _heartbeat(self, heartbeat_counter):
+        self.logger.info(f"Heartbeat: {heartbeat_counter} topics processed. "
+                         f"Success: {self.stats['success']}, Fail: {self.stats['fail']}, Skipped: {self.stats['skipped']}.")
+
+    def _log_summary(self):
+        self.logger.info("===== PROCESSING SUMMARY =====")
+        self.logger.info(f"Total topics: {self.stats['total']}")
+        self.logger.info(f"Success: {self.stats['success']}")
+        self.logger.info(f"Fail: {self.stats['fail']}")
+        self.logger.info(f"Skipped: {self.stats['skipped']}")
+        # Сохраним подробную статистику
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/summary_stats.json", "w", encoding="utf-8") as f:
+            import json
+            json.dump(self.stats, f, ensure_ascii=False, indent=2)
 
     def run(self):
         self.logger.info("Bot started.")
@@ -192,13 +297,14 @@ class TelegramRAGSystem:
 
             heartbeat_counter += 1
             if heartbeat_counter % 5 == 0:
-                self.logger.info(f"Heartbeat: {heartbeat_counter} topics processed.")
+                self._heartbeat(heartbeat_counter)
                 self.state_manager.save_state()
 
             interval = self.config["telegram"].get("post_interval", 900)
             self.logger.debug(f"Sleeping for {interval}s before next topic...")
             time.sleep(interval)
 
+        self._log_summary()
         self.logger.info("Bot shutdown complete.")
 
 if __name__ == "__main__":
