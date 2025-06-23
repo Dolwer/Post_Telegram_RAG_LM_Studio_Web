@@ -7,7 +7,9 @@
         "retry_attempts": 3,
         "retry_delay": 3.0,
         "enable_preview": true,
-        "max_caption_length": 1024
+        "max_caption_length": 1024,
+        "post_interval": 900,
+        "max_retries": 3
     },
     "language_model": {
         "url": "http://localhost:1234/v1/chat/completions",
@@ -21,8 +23,8 @@
         "max_chars_with_media": 4096
     },
     "lm_studio": {
-        "base_url": "http://localhost:1234/v1/chat/completions",
-        "model": "qwen3-14b",
+        "base_url": "http://localhost:1234",
+        "model": "qwen/qwen3-14b",
         "max_tokens": 4096,
         "max_chars": 20000,
         "temperature": 0.7,
@@ -47,7 +49,10 @@
         "top_k_faiss": 8,
         "top_k_final": 3,
         "embedding_model": "all-MiniLM-L6-v2",
-        "cross_encoder": "cross-encoder/stsb-roberta-large"
+        "cross_encoder": "cross-encoder/stsb-roberta-large",
+        "max_context_length": 4096,
+        "media_context_length": 1024,
+        "similarity_threshold": 0.7
     },
     "system": {
         "chunk_usage_limit": 10,
@@ -99,12 +104,13 @@
         "endpoint": "https://google.serper.dev/search",
         "results_limit": 10
     },
-
     "processing": {
         "max_tasks_per_run": 1,
         "max_errors": 5,
         "error_backoff_sec": 30,
         "max_processing_time_sec": 300,
-        "shutdown_on_critical": true
+        "shutdown_on_critical": true,
+        "batch_size": 1,
+        "max_file_size_mb": 100
     }
 }
