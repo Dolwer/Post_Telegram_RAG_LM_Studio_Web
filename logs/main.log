@@ -1534,3 +1534,79 @@ ValueError: LM Studio generation failed after retries: LM Studio did not generat
 [2025-06-23 11:50:05,246] [ERROR] [Main] - [MONITOR] Topic failed: ЦИФРОВЫЕ ТЕХНОЛОГИИ: Внедрение GPS-мониторинга транспорта для автопарка, error: LM Studio generation failed after retries: LM Studio did not generate content after 3 attempts: 400 Client Error: Bad Request for url: http://localhost:1234/v1/chat/completions
 [2025-06-23 11:50:05,262] [INFO] [Main] - No more topics to process.
 [2025-06-23 11:50:05,275] [INFO] [Main] - System shut down gracefully.
+[2025-06-23 13:59:20,693] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 13:59:20,696] [CRITICAL] [Main] - Invalid config.json structure or missing values
+[2025-06-23 14:07:08,666] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 14:07:08,724] [CRITICAL] [Main] - Invalid config.json structure or missing values
+[2025-06-23 14:10:55,281] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:07"}
+[2025-06-23 14:10:55,286] [CRITICAL] [Main] - Invalid config.json structure or missing values
+[2025-06-23 14:12:06,054] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:07"}
+[2025-06-23 14:12:19,626] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 14:12:21,734] [CRITICAL] [Main] - LM Studio not available or model not loaded, aborting.
+[2025-06-23 14:13:42,851] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 14:13:56,096] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 14:13:58,198] [CRITICAL] [Main] - LM Studio not available or model not loaded, aborting.
+[2025-06-23 14:18:47,703] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 14:19:01,332] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 14:19:03,433] [CRITICAL] [Main] - LM Studio not available or model not loaded, aborting.
+[2025-06-23 14:20:14,388] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:07"}
+[2025-06-23 14:20:27,890] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 14:20:29,992] [INFO] [Main] - Bot started.
+[2025-06-23 14:20:30,008] [INFO] [Main] - No more topics in queue.
+[2025-06-23 14:20:30,009] [INFO] [Main] - Bot shutdown complete.
+[2025-06-23 14:21:16,548] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 14:21:30,138] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 14:21:32,240] [INFO] [Main] - Bot started.
+[2025-06-23 14:21:32,241] [INFO] [Main] - Processing topic: СПЕЦТЕХНИКА ДЛЯ СТРОИТЕЛЬСТВА: Выбор экскаватора для котлована: гусеничный vs колесный
+[2025-06-23 14:40:18,454] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 14:40:32,328] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 14:40:34,356] [INFO] [Main] - Bot started.
+[2025-06-23 14:40:34,428] [INFO] [Main] - Processing topic: СПЕЦТЕХНИКА ДЛЯ СТРОИТЕЛЬСТВА: Выбор экскаватора для котлована: гусеничный vs колесный
+[2025-06-23 14:45:56,986] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 14:45:59,095] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 14:46:01,119] [WARNING] [Main] - Index file not found: data/faiss_index.idx
+[2025-06-23 14:46:01,180] [WARNING] [Main] - Embeddings file not found: data/embeddings.npy
+[2025-06-23 14:46:01,182] [WARNING] [Main] - Chunks file not found: data/chunks.json
+[2025-06-23 14:46:01,183] [WARNING] [Main] - RAG knowledge base not found. Building from data directory: data
+[2025-06-23 14:46:01,310] [INFO] [Main] - Bot started.
+[2025-06-23 14:46:01,312] [INFO] [Main] - Processing topic: СПЕЦТЕХНИКА ДЛЯ СТРОИТЕЛЬСТВА: Выбор экскаватора для котлована: гусеничный vs колесный
+[2025-06-23 14:48:04,570] [WARNING] [Main] - Content too long, requesting shortened version...
+[2025-06-23 14:49:25,208] [WARNING] [Main] - Received shutdown signal.
+[2025-06-23 14:49:37,332] [INFO] [Main] - Topic 'СПЕЦТЕХНИКА ДЛЯ СТРОИТЕЛЬСТВА: Выбор экскаватора для котлована: гусеничный vs колесный' successfully posted.
+[2025-06-23 15:23:18,927] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 15:23:32,543] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 15:23:34,579] [INFO] [Main] - RAG knowledge base loaded and ready.
+[2025-06-23 15:23:34,594] [INFO] [Main] - Bot started.
+[2025-06-23 15:23:34,595] [INFO] [Main] - Processing topic: МУСОРОВОЗЫ: Закупка мусоровозов с прессом для муниципалитетов
+[2025-06-23 15:25:35,184] [WARNING] [Main] - Content too long, requesting shortened version...
+[2025-06-23 15:27:08,833] [INFO] [Main] - Topic 'МУСОРОВОЗЫ: Закупка мусоровозов с прессом для муниципалитетов' successfully posted.
+[2025-06-23 15:32:51,104] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:07"}
+[2025-06-23 15:32:53,936] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 15:32:55,974] [INFO] [Main] - RAG knowledge base loaded and ready.
+[2025-06-23 15:32:55,975] [INFO] [Main] - Bot started.
+[2025-06-23 15:32:55,976] [INFO] [Main] - Processing topic: ТЯГАЧИ СЕДЕЛЬНЫЕ: Купить тягач Volvo FH б/у с пробегом из Европы
+[2025-06-23 15:35:28,985] [WARNING] [Main] - Content too long, requesting shortened version...
+[2025-06-23 15:37:01,080] [INFO] [Main] - Topic 'ТЯГАЧИ СЕДЕЛЬНЫЕ: Купить тягач Volvo FH б/у с пробегом из Европы' successfully posted.
+[2025-06-23 15:50:31,544] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 15:50:44,996] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 15:50:47,084] [INFO] [Main] - Bot started.
+[2025-06-23 15:50:47,086] [INFO] [Main] - Processing topic: КОММУНАЛЬНАЯ ТЕХНИКА: Аренда дорожной техники для зимней уборки с оператором
+[2025-06-23 15:50:48,786] [INFO] [Main] - Template does not require media. No media will be attached.
+[2025-06-23 15:53:05,600] [INFO] [Main] - Topic 'КОММУНАЛЬНАЯ ТЕХНИКА: Аренда дорожной техники для зимней уборки с оператором' successfully posted.
+[2025-06-23 16:03:46,093] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:07"}
+[2025-06-23 16:03:59,553] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 16:04:01,621] [INFO] [Main] - Bot started.
+[2025-06-23 16:04:01,637] [INFO] [Main] - Processing topic: БОРТОВЫЕ АВТОМОБИЛИ: Продажа бортовых ГАЗонов NEXT с КМУ
+[2025-06-23 16:04:03,937] [INFO] [Main] - Template does not require media. No media will be attached.
+[2025-06-23 16:10:29,769] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 16:10:43,219] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 16:10:45,322] [INFO] [Main] - Bot started.
+[2025-06-23 16:10:45,324] [INFO] [Main] - Processing topic: БОРТОВЫЕ АВТОМОБИЛИ: Продажа бортовых ГАЗонов NEXT с КМУ
+[2025-06-23 16:10:47,087] [INFO] [Main] - Template does not require media. No media will be attached.
+[2025-06-23 16:14:07,747] [INFO] [Main] - Topic 'БОРТОВЫЕ АВТОМОБИЛИ: Продажа бортовых ГАЗонов NEXT с КМУ' successfully posted.
+[2025-06-23 16:22:40,595] [INFO] [Main] - System Info: {"platform": "Windows-10-10.0.19045-SP0", "cpu_count": 12, "memory_total_mb": 32691, "boot_time": "2025-06-19 12:41:06"}
+[2025-06-23 16:22:42,906] [INFO] [Main] - 30 topics loaded from file.
+[2025-06-23 16:22:44,950] [INFO] [Main] - Bot started.
+[2025-06-23 16:22:44,982] [INFO] [Main] - Processing topic: ЗАКОНОДАТЕЛЬСТВО И РЕГУЛИРОВАНИЕ: Оформление разрешений на перевозку негабарита: новые правила
+[2025-06-23 16:22:57,079] [INFO] [Main] - Template does not require media. No media will be attached.
+[2025-06-23 16:25:32,017] [INFO] [Main] - Topic 'ЗАКОНОДАТЕЛЬСТВО И РЕГУЛИРОВАНИЕ: Оформление разрешений на перевозку негабарита: новые правила' successfully posted.

@@ -110,11 +110,32 @@ class TelegramRAGSystem:
             self.logger.warning("Content too long, requesting shortened version...")
             return self.lm_client.request_shorter_version(prompt, current_length=len(text), target_length=1024 if has_media else 4096)
 
+    def _select_and_check_template(self, topic: str, context: str) -> tuple:
+        """
+        Выбирает случайные шаблоны, читает их, возвращает: текст шаблона, media_needed (bool).
+        """
+        template_paths = self.prompt_builder.select_random_templates()
+        template_texts = [self.prompt_builder.read_template_file(path) for path in template_paths]
+        template_combined = "\n\n".join(template_texts).strip()
+        has_uploadfile = "{UPLOADFILE}" in template_combined
+        return template_combined, has_uploadfile, template_paths
+
     def _process_topic(self, topic: str) -> bool:
         self.logger.info(f"Processing topic: {topic}")
+
         context = self._combine_context(topic)
-        media_file = self.media_handler.get_random_media_file()
-        prompt = self.prompt_builder.build_prompt(topic, context, media_file)
+        template_combined, has_uploadfile, template_paths = self._select_and_check_template(topic, context)
+
+        media_file = None
+        if has_uploadfile:
+            media_file = self.media_handler.get_random_media_file()
+            if media_file is None:
+                self.logger.warning("Template requires media, but no media file available. Proceeding without media.")
+        else:
+            self.logger.info("Template does not require media. No media will be attached.")
+
+        # Собираем prompt только после анализа шаблона и определения media
+        prompt = self.prompt_builder.build_prompt(topic, context, media_file if has_uploadfile else None)
 
         self.logger.debug(f"Prompt (truncated): {prompt[:1500]}")
         self.logger.debug(f"Media file: {media_file}")
@@ -130,17 +151,18 @@ class TelegramRAGSystem:
                         # Fallback: сократить prompt/context и попробовать ещё раз
                         self.logger.warning("Retrying with shortened prompt/context after error.")
                         context_short = context[:2048]
-                        prompt_short = self.prompt_builder.build_prompt(topic, context_short, media_file)
+                        prompt_short = self.prompt_builder.build_prompt(topic, context_short, media_file if has_uploadfile else None)
                         response = self.lm_client.generate_with_retry(prompt_short)
                     else:
                         raise
 
                 self.logger.debug(f"LM Studio response (truncated): {response[:1500]}")
                 # Проверка и сокращение длины при необходимости
-                response = self._shorten_if_needed(response, prompt, has_media=bool(media_file))
-                validated = self.content_validator.validate_content(response, has_media=bool(media_file))
+                response = self._shorten_if_needed(response, prompt, has_media=bool(media_file) and has_uploadfile)
+                validated = self.content_validator.validate_content(response, has_media=bool(media_file) and has_uploadfile)
+                formatted = self.content_validator.format_for_telegram(validated, max_len=1024 if media_file and has_uploadfile else 4096)
 
-                if media_file:
+                if media_file and has_uploadfile:
                     result = self.telegram_client.send_media_message(validated, media_file)
                 else:
                     result = self.telegram_client.send_text_message(validated)

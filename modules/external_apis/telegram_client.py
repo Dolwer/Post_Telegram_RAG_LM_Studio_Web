@@ -3,7 +3,6 @@ import time
 import requests
 from typing import Optional, Dict, Union
 
-
 class TelegramClient:
     TELEGRAM_API_URL = "https://api.telegram.org"
 
@@ -22,9 +21,15 @@ class TelegramClient:
         self.retry_attempts = config.get("retry_attempts", 3)
         self.retry_delay = config.get("retry_delay", 2)
 
+    @staticmethod
+    def _telegram_code_units(text: str) -> int:
+        """Подсчёт длины текста/caption по code units (UTF-16) — как в Telegram API."""
+        return len(text.encode('utf-16-le')) // 2
+
     def send_text_message(self, text: str) -> bool:
-        if not self.validate_message_length(text, has_media=False):
-            self.logger.warning("Text message exceeds Telegram limits.")
+        length = self._telegram_code_units(text)
+        if length > self.max_text_length:
+            self.logger.warning(f"Text message exceeds Telegram limits: {length} > {self.max_text_length} code units.")
             return False
 
         payload = {
@@ -33,11 +38,15 @@ class TelegramClient:
             "parse_mode": self.parse_mode,
             "disable_web_page_preview": self.disable_preview
         }
-        return self._post_with_retry("sendMessage", json=payload)
+        result = self._post_with_retry("sendMessage", json=payload)
+        if not result:
+            self.logger.error(f"Failed to send text message (length={length} code units).")
+        return result
 
     def send_media_message(self, text: str, media_path: str) -> bool:
-        if not self.validate_message_length(text, has_media=True):
-            self.logger.warning("Caption exceeds Telegram limits.")
+        length = self._telegram_code_units(text)
+        if length > self.max_caption_length:
+            self.logger.warning(f"Caption exceeds Telegram limits: {length} > {self.max_caption_length} code units.")
             return False
 
         media_type = self.get_media_type(media_path)
@@ -59,7 +68,10 @@ class TelegramClient:
                     "caption": self.format_message(text),
                     "parse_mode": self.parse_mode
                 }
-                return self._post_with_retry(method, data=data, files=files)
+                result = self._post_with_retry(method, data=data, files=files)
+                if not result:
+                    self.logger.error(f"Failed to send media message (caption length={length} code units).")
+                return result
         except Exception as e:
             self.logger.exception(f"Failed to open or send media: {media_path}")
             return False
@@ -100,14 +112,18 @@ class TelegramClient:
         return self._post_with_retry("sendMessage", json=message_data)
 
     def format_message(self, text: str) -> str:
-        return self.escape_html(text) if self.parse_mode == "HTML" else text
+        # Для parse_mode HTML Telegram сам не требует экранирования стандартных тегов,
+        # но в спорных случаях лучше экранировать спецсимволы вне тегов.
+        if self.parse_mode == "HTML":
+            return text  # Предполагается, что текст уже подготовлен валидатором.
+        return text
 
     def escape_html(self, text: str) -> str:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     def validate_message_length(self, text: str, has_media: bool) -> bool:
         limit = self.max_caption_length if has_media else self.max_text_length
-        return len(text) <= limit
+        return self._telegram_code_units(text) <= limit
 
     def get_media_type(self, file_path: str) -> Optional[str]:
         ext = file_path.lower().split('.')[-1]

@@ -6,7 +6,8 @@ from typing import List, Tuple, Dict, Optional
 
 class PromptBuilder:
     """
-    Отвечает за сборку промпта из шаблонов, подстановку переменных и валидацию.
+    Класс для сборки промпта из шаблонов с поддержкой подстановки переменных, валидации структуры,
+    контроля лимитов Telegram и интеграции медиа-файлов по наличию плейсхолдера {UPLOADFILE}.
     """
     REQUIRED_PLACEHOLDERS = ["{TOPIC}", "{CONTEXT}"]
 
@@ -23,6 +24,7 @@ class PromptBuilder:
         """
         Загружает все шаблоны из указанных папок в self.templates.
         """
+        self.templates.clear()
         for folder in self.prompt_folders:
             if not folder.exists():
                 self.logger.warning(f"Prompt folder does not exist: {folder}")
@@ -39,7 +41,7 @@ class PromptBuilder:
 
     def select_random_templates(self) -> List[str]:
         """
-        Случайно выбирает по одному шаблону из каждой папки. 
+        Случайно выбирает по одному шаблону из каждой папки.
         Если в папке нет шаблонов — вместо файла будет пустая строка.
         """
         selected = []
@@ -91,6 +93,12 @@ class PromptBuilder:
         - Склеивает их содержимое
         - Проверяет, что до подстановки есть все обязательные плейсхолдеры
         - Подставляет значения плейсхолдеров
+
+        Важно:
+        - Если плейсхолдер {UPLOADFILE} присутствует в шаблоне — context должен быть усечён до 1024 code units (Telegram caption).
+        - Если {UPLOADFILE} отсутствует — context должен быть не длиннее 4096 code units (Telegram post).
+        - Медиа-файл подставляется только если плейсхолдер есть в шаблоне.
+
         :param topic: Тема для подстановки
         :param context: Контекст для подстановки
         :param media_file: Путь к медиафайлу (необязательно)
@@ -105,27 +113,58 @@ class PromptBuilder:
         if not self.validate_prompt_structure(content):
             raise ValueError("Prompt structure validation failed. Missing required placeholders in templates.")
 
+        # Определяем, требуется ли медиа и лимитируем длину контекста
+        has_uploadfile = "{UPLOADFILE}" in content
+        # Обработка длины context: Telegram считает code units (UTF-16), Python считает символы, но это ≈ ок для ascii/ru, лучше - учитывать суррогаты
+        def telegram_code_units(s: str) -> int:
+            return len(s.encode('utf-16-le')) // 2
+
+        # Усечение context для конкретного лимита
+        context_limit = 1024 if has_uploadfile else 4096
+        orig_context_len = telegram_code_units(context)
+        if orig_context_len > context_limit:
+            # Усечение "по code units" с сохранением целостности слов
+            words = context.split()
+            truncated = ""
+            for word in words:
+                if telegram_code_units(truncated + " " + word) > context_limit:
+                    break
+                truncated = (truncated + " " + word).strip()
+            self.logger.info(f"Context truncated from {orig_context_len} to {telegram_code_units(truncated)} code units (limit {context_limit})")
+            context = truncated
+
+        # Плейсхолдер {UPLOADFILE}: если нет в шаблоне — не подставлять медиа
+        if has_uploadfile and media_file:
+            uploadfile_val = media_file.strip()
+        else:
+            uploadfile_val = ""
+
         replacements = {
             "{TOPIC}": topic.strip(),
             "{CONTEXT}": context.strip(),
-            "{UPLOADFILE}": media_file.strip() if media_file else ""
+            "{UPLOADFILE}": uploadfile_val
         }
 
         prompt = self.replace_placeholders(content, replacements)
 
-        # Логируем неиспользованные плейсхолдеры для отладки
+        # Логирование неиспользованных плейсхолдеров для отладки
         unused = [ph for ph in self.REQUIRED_PLACEHOLDERS + ["{UPLOADFILE}"] if ph in prompt]
         if unused:
             self.logger.warning(f"Prompt still contains unused placeholders: {unused}")
 
-        # Дополнительно: очистка двойных/тройных пустых строк для компактности
+        # Очистка двойных/тройных пустых строк для компактности
         prompt = self._compact_whitespace(prompt)
         self.logger.debug(f"Final prompt (truncated): {prompt[:1000]}")
         return prompt
 
     def _compact_whitespace(self, text: str) -> str:
-        """Удаляет избыточные пустые строки для компактности и чистоты промпта."""
-        return os.linesep.join([line for line in text.splitlines() if line.strip()])
+        """
+        Сохраняет одиночные и двойные пустые строки.
+        Блоки из трех и более пустых строк заменяет на две подряд.
+        """
+        # Заменяет три и более \n подряд на ровно две
+        import re
+        return re.sub(r'\n{3,}', '\n\n', text)
 
     def check_placeholder_presence(self, template: str) -> Dict[str, bool]:
         """
