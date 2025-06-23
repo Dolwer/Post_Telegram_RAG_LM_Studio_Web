@@ -15,12 +15,21 @@ from modules.content_generation.prompt_builder import PromptBuilder
 from modules.content_generation.content_validator import ContentValidator
 from modules.content_generation.lm_client import LMStudioClient
 
+def clean_context(text: str) -> str:
+    """Удаляет мусорные строки из контекста, очищает от 'nan', 'Data too large for file format' и пустых строк."""
+    lines = text.splitlines()
+    cleaned = [
+        line for line in lines
+        if line.strip() and
+           "nan" not in line.lower() and
+           "data too large for file format" not in line.lower()
+    ]
+    return "\n".join(cleaned)
 
 class TelegramRAGSystem:
     def __init__(self, config_path: str = "config/config.json"):
         self.logger = get_logger("Main")
         self.shutdown_requested = False
-        self.heartbeat_counter = 0
 
         try:
             log_system_info(self.logger)
@@ -29,6 +38,10 @@ class TelegramRAGSystem:
             self._validate_config()
             self._init_services()
             self._load_topics()
+            # Health check LM Studio
+            if not self.lm_client.check_connection():
+                self.logger.critical("LM Studio not available or model not loaded, aborting.")
+                sys.exit(1)
         except Exception as e:
             self.logger.critical("Failed during initialization", exc_info=True)
             sys.exit(1)
@@ -79,12 +92,17 @@ class TelegramRAGSystem:
         self.shutdown_requested = True
 
     def _combine_context(self, topic: str) -> str:
+        """Собирает и очищает объединённый контекст для промпта."""
         rag = self.rag_retriever.retrieve_context(topic)
         web_results = self.web_search.search(topic)
         web = self.web_search.extract_content(web_results)
-        return f"{rag}\n\n[WEB]\n{web}"
+        full_context = f"{rag}\n\n[WEB]\n{web}"
+        full_context = clean_context(full_context)
+        self.logger.debug(f"Combined context (truncated): {full_context[:1000]}")
+        return full_context
 
     def _shorten_if_needed(self, text: str, prompt: str, has_media: bool) -> str:
+        """Если контент слишком длинный — автоматически просит нейросеть сократить его."""
         try:
             self.content_validator.validate_content(text, has_media=has_media)
             return text
@@ -98,22 +116,41 @@ class TelegramRAGSystem:
         media_file = self.media_handler.get_random_media_file()
         prompt = self.prompt_builder.build_prompt(topic, context, media_file)
 
+        self.logger.debug(f"Prompt (truncated): {prompt[:1500]}")
+        self.logger.debug(f"Media file: {media_file}")
+
         try:
-            response = self.lm_client.generate_with_retry(prompt)
-            response = self._shorten_if_needed(response, prompt, has_media=bool(media_file))
-            validated = self.content_validator.validate_content(response, has_media=bool(media_file))
+            # Основная генерация, с fallback на сокращение при ошибке
+            for attempt in range(2):
+                try:
+                    response = self.lm_client.generate_with_retry(prompt)
+                except Exception as e:
+                    self.logger.error(f"LM Studio generation error: {e}")
+                    if attempt == 0:
+                        # Fallback: сократить prompt/context и попробовать ещё раз
+                        self.logger.warning("Retrying with shortened prompt/context after error.")
+                        context_short = context[:2048]
+                        prompt_short = self.prompt_builder.build_prompt(topic, context_short, media_file)
+                        response = self.lm_client.generate_with_retry(prompt_short)
+                    else:
+                        raise
 
-            if media_file:
-                result = self.telegram_client.send_media_message(validated, media_file)
-            else:
-                result = self.telegram_client.send_text_message(validated)
+                self.logger.debug(f"LM Studio response (truncated): {response[:1500]}")
+                # Проверка и сокращение длины при необходимости
+                response = self._shorten_if_needed(response, prompt, has_media=bool(media_file))
+                validated = self.content_validator.validate_content(response, has_media=bool(media_file))
 
-            if result:
-                self.logger.info(f"Topic '{topic}' successfully posted.")
-            else:
-                self.logger.error(f"Failed to publish topic '{topic}'.")
+                if media_file:
+                    result = self.telegram_client.send_media_message(validated, media_file)
+                else:
+                    result = self.telegram_client.send_text_message(validated)
 
-            return result
+                if result:
+                    self.logger.info(f"Topic '{topic}' successfully posted.")
+                else:
+                    self.logger.error(f"Failed to publish topic '{topic}'.")
+
+                return result
 
         except Exception as e:
             self.logger.error(f"Unhandled error on topic '{topic}'", exc_info=True)
@@ -121,6 +158,7 @@ class TelegramRAGSystem:
 
     def run(self):
         self.logger.info("Bot started.")
+        heartbeat_counter = 0
         while not self.shutdown_requested:
             topic = self.state_manager.get_next_unprocessed_topic()
             if not topic:
@@ -130,9 +168,9 @@ class TelegramRAGSystem:
             success = self._process_topic(topic)
             self.state_manager.mark_topic_processed(topic, success=success)
 
-            self.heartbeat_counter += 1
-            if self.heartbeat_counter % 5 == 0:
-                self.logger.info(f"Heartbeat: {self.heartbeat_counter} topics processed.")
+            heartbeat_counter += 1
+            if heartbeat_counter % 5 == 0:
+                self.logger.info(f"Heartbeat: {heartbeat_counter} topics processed.")
                 self.state_manager.save_state()
 
             interval = self.config["telegram"].get("post_interval", 900)
@@ -140,3 +178,7 @@ class TelegramRAGSystem:
             time.sleep(interval)
 
         self.logger.info("Bot shutdown complete.")
+
+if __name__ == "__main__":
+    system = TelegramRAGSystem()
+    system.run()

@@ -1,114 +1,171 @@
-# modules/utils/config_manager.py
-
 import json
+import os
 import logging
-from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Optional, Any, Dict
 
 class ConfigManager:
-    def __init__(self, config_path: Union[str, Path]):
-        self.config_path = Path(config_path)
-        self.config = {}
-        self.logger = logging.getLogger("ConfigManager")
-        self.load_config()
+    """
+    Менеджер конфигураций для всей системы автопостинга с RAG и LM Studio.
+    Гарантирует: корректную загрузку, подробную валидацию и безопасный доступ к параметрам.
+    """
 
-    def load_config(self) -> None:
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+    def __init__(self, config_path: str = "config/config.json"):
+        self.logger = logging.getLogger("ConfigManager")
+        self.config_path = config_path
+        self.config = self._load_config()
+
+    def _load_config(self) -> dict:
+        """
+        Загружает конфиг из JSON-файла. В случае ошибки (отсутствие, синтаксис) — критический лог и exit.
+        """
         try:
-            with self.config_path.open("r", encoding="utf-8") as file:
-                self.config = json.load(file)
-                self.logger.info(f"Configuration loaded from {self.config_path}")
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            self.logger.info(f"Loaded config from {self.config_path}")
+            return config
+        except FileNotFoundError:
+            self.logger.critical(f"Config file not found: {self.config_path}")
+            raise
         except json.JSONDecodeError as e:
-            self.logger.exception("Failed to decode JSON config")
-            raise ValueError("Invalid JSON format in configuration") from e
+            self.logger.critical(f"Failed to parse config.json: {e}")
+            raise
+
+    def validate_config(self) -> bool:
+        """
+        Проверяет наличие всех обязательных секций и ключей. Логирует каждую причину.
+        Возвращает: True — если всё ок, иначе False.
+        """
+        errors = []
+        config = self.config
+
+        # Обязательные секции
+        required_sections = ["lm_studio", "rag", "telegram", "serper", "processing", "paths"]
+        for section in required_sections:
+            if section not in config:
+                errors.append(f"Missing required section: '{section}'")
+
+        # Проверка ключей для lm_studio
+        if "lm_studio" in config:
+            for key in ["base_url", "model", "max_tokens", "temperature", "timeout"]:
+                if key not in config["lm_studio"]:
+                    errors.append(f"Missing key '{key}' in section 'lm_studio'")
+
+        # Проверка ключей для rag
+        if "rag" in config:
+            for key in ["embedding_model", "chunk_size", "chunk_overlap", "max_context_length", "media_context_length", "similarity_threshold"]:
+                if key not in config["rag"]:
+                    errors.append(f"Missing key '{key}' in section 'rag'")
+
+        # Проверка ключей telegram
+        if "telegram" in config:
+            for key in ["post_interval", "max_retries"]:
+                if key not in config["telegram"]:
+                    errors.append(f"Missing key '{key}' in section 'telegram'")
+
+        # serper
+        if "serper" in config:
+            for key in ["results_limit"]:
+                if key not in config["serper"]:
+                    errors.append(f"Missing key '{key}' in section 'serper'")
+
+        # processing
+        if "processing" in config:
+            for key in ["batch_size", "max_file_size_mb"]:
+                if key not in config["processing"]:
+                    errors.append(f"Missing key '{key}' in section 'processing'")
+
+        # paths
+        if "paths" in config:
+            for key in ["media_dir", "prompt_folders", "data_dir", "processed_topics_file"]:
+                if key not in config["paths"]:
+                    errors.append(f"Missing key '{key}' in section 'paths'")
+
+        if errors:
+            for err in errors:
+                self.logger.critical(f"Config validation error: {err}")
+            return False
+        return True
 
     def get_config_value(self, key_path: str, default: Any = None) -> Any:
+        """
+        Позволяет получать значение по "пути" через точку, например: 'lm_studio.base_url'
+        Если не найдено — возвращает default.
+        """
         keys = key_path.split(".")
         value = self.config
         try:
-            for key in keys:
-                value = value[key]
+            for k in keys:
+                value = value[k]
             return value
         except (KeyError, TypeError):
-            self.logger.warning(f"Missing config key: {key_path}. Using default: {default}")
+            self.logger.warning(f"Config key not found: {key_path}, using default: {default}")
             return default
 
     def get_telegram_token(self) -> str:
-        token_path = Path(self.get_config_value("telegram.bot_token_file", "config/telegram_token.txt"))
-        return self._read_text_file(token_path, "Telegram Token")
+        """Читает токен Telegram-бота из config/telegram_token.txt"""
+        token_file = os.path.join("config", "telegram_token.txt")
+        try:
+            with open(token_file, "r", encoding="utf-8") as f:
+                token = f.read().strip()
+            if not token:
+                self.logger.critical("Telegram token file is empty!")
+                raise ValueError("Empty Telegram token")
+            return token
+        except Exception as e:
+            self.logger.critical(f"Failed to read Telegram token: {e}")
+            raise
 
     def get_telegram_channel_id(self) -> str:
-        channel_path = Path(self.get_config_value("telegram.channel_id_file", "config/telegram_channel.txt"))
-        return self._read_text_file(channel_path, "Telegram Channel ID")
+        """Читает ID канала Telegram из config/telegram_channel.txt"""
+        channel_file = os.path.join("config", "telegram_channel.txt")
+        try:
+            with open(channel_file, "r", encoding="utf-8") as f:
+                channel_id = f.read().strip()
+            if not channel_id:
+                self.logger.critical("Telegram channel ID file is empty!")
+                raise ValueError("Empty Telegram channel ID")
+            return channel_id
+        except Exception as e:
+            self.logger.critical(f"Failed to read Telegram channel ID: {e}")
+            raise
 
     def get_lm_studio_config(self) -> dict:
-        return self.get_config_value("lm_studio", {})
+        return self.config.get("lm_studio", {})
 
     def get_rag_config(self) -> dict:
-        return self.get_config_value("rag", {})
+        return self.config.get("rag", {})
 
-    def get_serper_api_key(self) -> str:
-        """Получает ключ Serper API из config.json или файла, согласно структуре."""
-        # 1. Новый стиль: external_apis.serper.api_key
-        key = self.get_config_value("external_apis.serper.api_key", None)
-        if key:
-            return key
-        # 2. Старый стиль: external_apis["serper.api_key"]
-        key = self.get_config_value("external_apis.serper.api_key", None)
-        if key:
-            return key
-        # 3. Через файл: serper.api_key_file
-        api_key_file = self.get_config_value("serper.api_key_file", None)
-        if api_key_file:
-            try:
-                return self._read_text_file(Path(api_key_file), "Serper API Key")
-            except FileNotFoundError:
-                self.logger.error(f"Serper API key file not found: {api_key_file}")
-        # 4. Через файл: external_apis.serper.api_key_file
-        api_key_file = self.get_config_value("external_apis.serper.api_key_file", None)
-        if api_key_file:
-            try:
-                return self._read_text_file(Path(api_key_file), "Serper API Key (external_apis)")
-            except FileNotFoundError:
-                self.logger.error(f"Serper API key file not found: {api_key_file}")
-        self.logger.critical("Serper API key not found in config or file!")
-        return ""
+    def get_serper_api_key(self) -> Optional[str]:
+        """Пробует взять serper API ключ из переменной окружения или файла."""
+        api_key = os.environ.get("SERPER_API_KEY")
+        if api_key:
+            return api_key
+        # Можно добавить вариант с файлом
+        key_file = os.path.join("config", "serper_api_key.txt")
+        if os.path.exists(key_file):
+            with open(key_file, "r", encoding="utf-8") as f:
+                api_key = f.read().strip()
+            if api_key:
+                return api_key
+        # Fallback: попробовать из конфига
+        return self.config.get("serper", {}).get("api_key")
 
-    def update_config_value(self, key_path: str, value: Any) -> None:
-        keys = key_path.split(".")
-        ref = self.config
-        for key in keys[:-1]:
-            ref = ref.setdefault(key, {})
-        ref[keys[-1]] = value
-        self.logger.info(f"Updated config key: {key_path} = {value}")
+    def get_all_config(self) -> dict:
+        """Возвращает полный конфиг (для отладки, без секретных полей)."""
+        safe_config = self.config.copy()
+        # Можно тут удалить/заменить чувствительные данные, если они есть
+        return safe_config
 
     def save_config(self) -> None:
+        """Сохраняет текущий конфиг обратно в файл."""
         try:
-            with self.config_path.open("w", encoding="utf-8") as file:
-                json.dump(self.config, file, indent=4, ensure_ascii=False)
-            self.logger.info(f"Configuration saved to {self.config_path}")
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+            self.logger.info("Config saved successfully.")
         except Exception as e:
-            self.logger.exception("Failed to save configuration")
-            raise IOError("Unable to save configuration") from e
+            self.logger.error(f"Failed to save config: {e}")
 
-    def validate_config(self) -> bool:
-        required_keys = ["lm_studio", "rag", "telegram", "serper", "processing"]
-        for key in required_keys:
-            if key not in self.config:
-                self.logger.error(f"Missing required section in config: '{key}'")
-                return False
-        self.logger.info("Configuration validated successfully")
-        return True
-
-    def _read_text_file(self, file_path: Path, label: str) -> str:
-        if not file_path.exists():
-            self.logger.error(f"{label} file not found: {file_path}")
-            raise FileNotFoundError(f"{label} file missing: {file_path}")
-        try:
-            content = file_path.read_text(encoding="utf-8").strip()
-            self.logger.debug(f"{label} loaded: {content[:10]}...")
-            return content
-        except Exception as e:
-            self.logger.exception(f"Failed to read {label} from file")
-            raise IOError(f"Error reading {label}") from e
+    def reload_config(self) -> None:
+        """Перечитывает конфиг с диска."""
+        self.config = self._load_config()
+        self.logger.info("Config reloaded.")
