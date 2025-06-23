@@ -1,140 +1,150 @@
 import logging
 import requests
-from typing import Dict, Any, List
+import time
+from typing import List, Optional
+
 
 class LMStudioClient:
-    def __init__(self, base_url: str, model: str, config: Dict[str, Any]):
+    def __init__(self, base_url: str, model: str, config: dict):
         self.base_url = base_url.rstrip("/")
         self.model = model
-        self.max_tokens = config.get("max_tokens", 4096)
-        self.max_chars = config.get("max_chars", 20000)
-        self.temperature = config.get("temperature", 0.7)
-        self.timeout = config.get("timeout", 60)
-        self.history_limit = config.get("history_limit", 3)
-        self.system_message = config.get("system_message", None)
-        self.max_chars_with_media = config.get("max_chars_with_media", 4096)
+        self.config = config
         self.logger = logging.getLogger("LMStudioClient")
-        self.history: List[Dict[str, str]] = []
 
-        if self.system_message and len(self.system_message) > 1000:
-            self.logger.warning("System message unusually long.")
+        # Параметры генерации
+        self.temperature = config.get("temperature", 0.7)
+        self.max_tokens = config.get("max_tokens", 4096)
+        self.timeout = config.get("timeout", 120)
+        self.top_k = config.get("top_k", 40)
+        self.top_p = config.get("top_p", 0.95)
+        self.system_message = config.get("system_message", "You are a helpful assistant.")
 
-        self.logger.info(f"LMStudioClient initialized with model '{model}' and config: {config}")
+        # История диалога
+        self.history: List[dict] = []
+        self.history_limit = config.get("history_limit", 5)
 
     def check_connection(self) -> bool:
         try:
-            response = requests.get(f"{self.base_url}/models", timeout=5)
-            models = response.json().get("data", [])
-            is_ok = any(m["id"] == self.model for m in models)
-            self.logger.info("LM Studio connection OK" if is_ok else "Model not found in LM Studio")
-            return is_ok
-        except Exception as e:
-            self.logger.error("Failed to connect to LM Studio", exc_info=True)
+            response = requests.get(self.base_url + "/v1/models", timeout=10)
+            if response.status_code == 200:
+                self.logger.info("Connected to LM Studio.")
+                return True
+            self.logger.warning(f"LM Studio connection failed: {response.status_code}")
+            return False
+        except requests.RequestException as e:
+            self.logger.error("LM Studio not reachable.", exc_info=True)
             return False
 
-    def get_model_info(self) -> Dict[str, Any]:
-        try:
-            resp = requests.get(f"{self.base_url}/models")
-            return resp.json()
-        except Exception as e:
-            self.logger.error("Model info retrieval failed", exc_info=True)
-            return {}
-
-    def generate_content(self, prompt: str, max_tokens: int = None, with_media=False) -> str:
-        max_tokens = max_tokens or self.max_tokens
-        # Compose prompt with system message
-        full_prompt = ""
-        if self.system_message:
-            full_prompt += f"{self.system_message}\n"
-        full_prompt += prompt
-
-        payload = {
-            "model": self.model,
-            "prompt": full_prompt,
-            "max_tokens": max_tokens,
-            "temperature": self.temperature,
-            "stream": False
-        }
-        try:
-            response = requests.post(
-                f"{self.base_url}/completions",
-                json=payload,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            result = response.json()
-            text = result.get("choices", [{}])[0].get("text", "")
-
-            limit = self.max_chars_with_media if with_media else self.max_chars
-            if not self.validate_response_length(text, limit):
-                self.logger.warning(f"Truncating response to {limit} chars")
-                text = text[:limit]
-            return text.strip()
-        except Exception as e:
-            self.logger.error("Content generation failed", exc_info=True)
-            raise
-
-    def generate_with_retry(self, prompt: str, max_retries: int = 3, with_media=False) -> str:
-        for attempt in range(1, max_retries + 1):
-            try:
-                return self.generate_content(prompt, with_media=with_media)
-            except Exception as e:
-                self.logger.warning(f"Retry {attempt}/{max_retries} for prompt generation")
-                if attempt == max_retries:
-                    raise
-
-    def validate_response_length(self, text: str, max_length: int = None) -> bool:
-        if max_length is None:
-            max_length = self.max_chars
-        if len(text) <= max_length:
-            return True
-        self.logger.warning(f"Response exceeds max length ({len(text)} > {max_length})")
-        return False
-
-    def request_shorter_version(self, original_prompt: str, current_length: int, target_length: int) -> str:
-        instruction = (
-            f"\n\n[ИНСТРУКЦИЯ]: Сократи предыдущий текст до {target_length} символов. "
-            "Сохрани ключевые идеи и структуру, но сделай более компактным."
-        )
-        new_prompt = original_prompt + instruction
-        return self.generate_with_retry(new_prompt)
+    def clear_conversation_history(self):
+        self.history.clear()
+        self.logger.info("LM history cleared.")
 
     def estimate_tokens(self, text: str) -> int:
-        # Примерная оценка: 1 токен ≈ 4 символа
-        return int(len(text) / 4)
+        return len(text.split()) * 1.3  # очень грубая оценка
 
-    def set_generation_parameters(self, temperature: float, top_p: float = None, top_k: int = None):
-        self.temperature = temperature
-        self.logger.info(f"Set generation temperature to {temperature}")
-        if top_p:
-            self.logger.info(f"Set top_p to {top_p}")
-        if top_k:
-            self.logger.info(f"Set top_k to {top_k}")
+    def _build_payload_chat(self, prompt: str) -> dict:
+        messages = [{"role": "system", "content": self.system_message}]
+        messages += self.history[-self.history_limit:]
+        messages.append({"role": "user", "content": prompt})
+        return {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": False,
+            "top_p": self.top_p,
+            "top_k": self.top_k,
+        }
+
+    def _build_payload_completion(self, prompt: str) -> dict:
+        return {
+            "model": self.model,
+            "prompt": prompt,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stop": None,
+        }
+
+    def _parse_response(self, response: requests.Response, mode: str) -> Optional[str]:
+        try:
+            result = response.json()
+        except ValueError:
+            self.logger.error("Failed to decode JSON from LM response.", exc_info=True)
+            return None
+
+        if "error" in result:
+            self.logger.error(f"LMStudio error: {result['error']}")
+            return None
+
+        try:
+            if mode == "chat":
+                return result["choices"][0]["message"]["content"]
+            else:
+                return result["choices"][0]["text"]
+        except (KeyError, IndexError):
+            self.logger.error("LMStudio response missing required fields.", exc_info=True)
+            return None
+
+    def generate_content(self, prompt: str) -> Optional[str]:
+        mode = "chat"
+        url = f"{self.base_url}/v1/chat/completions"
+        payload = self._build_payload_chat(prompt)
+
+        try:
+            response = requests.post(url, json=payload, timeout=self.timeout)
+            self.logger.info(f"[LM] POST {url} [{response.status_code}] in {response.elapsed.total_seconds():.2f}s")
+            content = self._parse_response(response, mode)
+            if content:
+                self.history.append({"role": "user", "content": prompt})
+                self.history.append({"role": "assistant", "content": content})
+                return content
+        except requests.RequestException as e:
+            self.logger.error(f"Request failed to LMStudio at {url}", exc_info=True)
+
+        # fallback to completions
+        self.logger.warning("Falling back to /v1/completions")
+        fallback_url = f"{self.base_url}/v1/completions"
+        fallback_payload = self._build_payload_completion(prompt)
+
+        try:
+            response = requests.post(fallback_url, json=fallback_payload, timeout=self.timeout)
+            self.logger.info(f"[LM] Fallback POST {fallback_url} [{response.status_code}] in {response.elapsed.total_seconds():.2f}s")
+            return self._parse_response(response, "completion")
+        except requests.RequestException as e:
+            self.logger.error(f"Fallback request also failed.", exc_info=True)
+            return None
+
+    def generate_with_retry(self, prompt: str, max_retries: int = 3, delay: float = 3.0) -> str:
+        for attempt in range(max_retries):
+            result = self.generate_content(prompt)
+            if result:
+                return result
+            self.logger.warning(f"LM generation failed (attempt {attempt+1}/{max_retries}). Retrying in {delay}s...")
+            time.sleep(delay)
+
+        self.logger.critical("All LMStudio attempts failed. Raising exception.")
+        raise RuntimeError("LMStudio generation failed after retries.")
+
+    def request_shorter_version(self, original_prompt: str, current_length: int, target_length: int) -> str:
+        shorten_instruction = (
+            f"{original_prompt}\n\nPlease shorten the response to less than {target_length} characters."
+        )
+        try:
+            result = self.generate_with_retry(shorten_instruction)
+            return result if result else ""
+        except Exception as e:
+            self.logger.error("Failed to generate shorter version.", exc_info=True)
+            return ""
 
     def get_generation_stats(self) -> dict:
         return {
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "timeout": self.timeout,
-            "max_chars": self.max_chars,
-            "max_chars_with_media": self.max_chars_with_media,
-            "history_limit": self.history_limit,
-            "system_message": self.system_message
+            "history_length": len(self.history),
+            "history_tokens": sum(self.estimate_tokens(m['content']) for m in self.history)
         }
 
-    def clear_conversation_history(self):
-        self.history = []
-        self.logger.debug("Conversation history cleared.")
-
-    def add_to_history(self, user_message: str, bot_message: str):
-        self.history.append({"user": user_message, "bot": bot_message})
-        if self.history_limit and len(self.history) > self.history_limit:
-            self.history = self.history[-self.history_limit:]
-
     def health_check(self) -> dict:
-        try:
-            resp = requests.get(f"{self.base_url}/health")
-            return resp.json()
-        except Exception as e:
-            self.logger.warning("Health check failed", exc_info=True)
-            return {"status": "unreachable"}
+        return {
+            "connected": self.check_connection(),
+            "model": self.model,
+            "stats": self.get_generation_stats()
+        }

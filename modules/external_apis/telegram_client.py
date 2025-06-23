@@ -1,36 +1,43 @@
-# modules/external_apis/telegram_client.py
-
 import logging
 import time
 import requests
-from typing import Optional, Dict
+from typing import Optional, Dict, Union
+
 
 class TelegramClient:
     TELEGRAM_API_URL = "https://api.telegram.org"
 
     def __init__(self, token: str, channel_id: str, config: dict):
+        self.logger = logging.getLogger("TelegramClient")
         self.token = token
         self.channel_id = channel_id
         self.config = config
-        self.logger = logging.getLogger("TelegramClient")
 
         self.api_base = f"{self.TELEGRAM_API_URL}/bot{self.token}"
 
+        self.max_text_length = config.get("max_text_length", 4096)
+        self.max_caption_length = config.get("max_caption_length", 1024)
+        self.parse_mode = config.get("parse_mode", "HTML")
+        self.disable_preview = config.get("disable_web_page_preview", True)
+        self.retry_attempts = config.get("retry_attempts", 3)
+        self.retry_delay = config.get("retry_delay", 2)
+
     def send_text_message(self, text: str) -> bool:
         if not self.validate_message_length(text, has_media=False):
-            self.logger.warning("Text message too long. Skipping.")
+            self.logger.warning("Text message exceeds Telegram limits.")
             return False
+
         payload = {
             "chat_id": self.channel_id,
             "text": self.format_message(text),
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "parse_mode": self.parse_mode,
+            "disable_web_page_preview": self.disable_preview
         }
-        return self._post("sendMessage", payload)
+        return self._post_with_retry("sendMessage", json=payload)
 
     def send_media_message(self, text: str, media_path: str) -> bool:
         if not self.validate_message_length(text, has_media=True):
-            self.logger.warning("Caption too long. Skipping media post.")
+            self.logger.warning("Caption exceeds Telegram limits.")
             return False
 
         media_type = self.get_media_type(media_path)
@@ -41,92 +48,103 @@ class TelegramClient:
         }.get(media_type)
 
         if not method:
-            self.logger.error(f"Unsupported media type for {media_path}")
+            self.logger.error(f"Unsupported media format for file: {media_path}")
             return False
-
-        files = {
-            media_type: open(media_path, "rb")
-        }
-        data = {
-            "chat_id": self.channel_id,
-            "caption": self.format_message(text),
-            "parse_mode": "HTML"
-        }
 
         try:
-            response = requests.post(f"{self.api_base}/{method}", data=data, files=files)
-            response.raise_for_status()
-            self.logger.info(f"Media message sent successfully: {media_path}")
-            return True
+            with open(media_path, "rb") as file:
+                files = {media_type: file}
+                data = {
+                    "chat_id": self.channel_id,
+                    "caption": self.format_message(text),
+                    "parse_mode": self.parse_mode
+                }
+                return self._post_with_retry(method, data=data, files=files)
         except Exception as e:
-            self.logger.error(f"Failed to send media: {media_path}", exc_info=True)
-            return False
-        finally:
-            files[media_type].close()
-
-    def _post(self, method: str, payload: dict) -> bool:
-        try:
-            response = requests.post(f"{self.api_base}/{method}", json=payload)
-            response.raise_for_status()
-            self.logger.info(f"Telegram message sent: {method}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Telegram API error: {method}", exc_info=True)
+            self.logger.exception(f"Failed to open or send media: {media_path}")
             return False
 
-    def retry_send_message(self, message_data: dict, max_retries: int = 3) -> bool:
-        for attempt in range(max_retries):
-            success = self._post("sendMessage", message_data)
-            if success:
-                return True
-            time.sleep(2 ** attempt)
+    def _post_with_retry(self, method: str, json: dict = None, data: dict = None, files: dict = None) -> bool:
+        url = f"{self.api_base}/{method}"
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                response = requests.post(url, json=json, data=data, files=files, timeout=10)
+                if response.status_code == 200:
+                    self.logger.info(f"[Telegram] {method} successful.")
+                    return True
+                else:
+                    self._log_telegram_failure(response, method)
+                    if response.status_code in {400, 403}:
+                        return False
+                    if response.status_code == 429:
+                        retry_after = response.json().get("parameters", {}).get("retry_after", 5)
+                        self.logger.warning(f"Rate limited. Retrying in {retry_after}s...")
+                        time.sleep(retry_after)
+                        continue
+            except Exception as e:
+                self.logger.warning(f"Attempt {attempt}/{self.retry_attempts} failed for {method}: {str(e)}")
+            time.sleep(self.retry_delay)
+        self.logger.error(f"All attempts failed for {method}.")
         return False
 
-    def format_message(self, text: str) -> str:
-        return self.escape_markdown(text)
+    def _log_telegram_failure(self, response: requests.Response, method: str):
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"error": "Invalid JSON from Telegram"}
+        self.logger.warning(
+            f"Telegram API failure [{method}]: {response.status_code} - {payload}"
+        )
 
-    def escape_markdown(self, text: str) -> str:
-        # Telegram HTML-compatible safe text
+    def retry_send_message(self, message_data: dict, max_retries: int = 3) -> bool:
+        return self._post_with_retry("sendMessage", json=message_data)
+
+    def format_message(self, text: str) -> str:
+        return self.escape_html(text) if self.parse_mode == "HTML" else text
+
+    def escape_html(self, text: str) -> str:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     def validate_message_length(self, text: str, has_media: bool) -> bool:
-        limit = 1024 if has_media else 4096
+        limit = self.max_caption_length if has_media else self.max_text_length
         return len(text) <= limit
 
     def get_media_type(self, file_path: str) -> Optional[str]:
         ext = file_path.lower().split('.')[-1]
-        if ext in ["jpg", "jpeg", "png"]:
+        if ext in ["jpg", "jpeg", "png", "webp"]:
             return "photo"
-        elif ext in ["mp4", "mov"]:
+        elif ext in ["mp4", "mov", "avi"]:
             return "video"
-        elif ext in ["pdf", "docx", "txt"]:
+        elif ext in ["pdf", "docx", "txt", "zip"]:
             return "document"
         return None
 
     def handle_telegram_errors(self, error: Exception) -> bool:
-        self.logger.error(f"Telegram error handled: {str(error)}")
+        self.logger.error(f"Handled Telegram error: {str(error)}")
         return False
 
     def check_bot_permissions(self) -> Dict[str, any]:
         try:
-            resp = requests.get(f"{self.api_base}/getMe")
-            info = resp.json()
-            self.logger.info(f"Bot Info: {info}")
-            return info
-        except Exception as e:
-            self.logger.error("Permission check failed", exc_info=True)
+            resp = requests.get(f"{self.api_base}/getMe", timeout=10)
+            data = resp.json()
+            self.logger.info(f"Bot identity: {data}")
+            return data
+        except Exception:
+            self.logger.error("Failed to fetch bot info.", exc_info=True)
             return {}
 
     def get_channel_info(self) -> Dict[str, any]:
         try:
-            resp = requests.get(f"{self.api_base}/getChat", params={"chat_id": self.channel_id})
+            resp = requests.get(f"{self.api_base}/getChat", params={"chat_id": self.channel_id}, timeout=10)
             return resp.json()
-        except Exception as e:
-            self.logger.warning("Failed to get channel info", exc_info=True)
+        except Exception:
+            self.logger.warning("Failed to retrieve channel info.", exc_info=True)
             return {}
 
     def get_send_stats(self) -> dict:
         return {
             "channel_id": self.channel_id,
             "token_hash": hash(self.token),
+            "parse_mode": self.parse_mode,
+            "retry_attempts": self.retry_attempts
         }
