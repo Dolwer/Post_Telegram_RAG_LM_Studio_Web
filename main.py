@@ -159,13 +159,13 @@ class TelegramRAGSystem:
                 self.logger.debug(f"LM Studio response (truncated): {response[:1500]}")
                 # Проверка и сокращение длины при необходимости
                 response = self._shorten_if_needed(response, prompt, has_media=bool(media_file) and has_uploadfile)
-                validated = self.content_validator.validate_content(response, has_media=bool(media_file) and has_uploadfile)
-                formatted = self.content_validator.format_for_telegram(validated, max_len=1024 if media_file and has_uploadfile else 4096)
-
-                if media_file and has_uploadfile:
-                    result = self.telegram_client.send_media_message(validated, media_file)
+                validated = self.content_validator.validate_content(response, has_media=bool(media_file))
+                formatted = self.content_validator.format_for_telegram(validated)
+                
+                if media_file:
+                    result = self.telegram_client.send_media_message(formatted, media_file)
                 else:
-                    result = self.telegram_client.send_text_message(validated)
+                    result = self.telegram_client.send_text_message(formatted)
 
                 if result:
                     self.logger.info(f"Topic '{topic}' successfully posted.")

@@ -8,13 +8,41 @@ from .rag_file_utils import FileProcessor
 from .rag_chunk_tracker import ChunkTracker
 from .embedding_manager import EmbeddingManager
 
+def get_rag_logger() -> logging.Logger:
+    """
+    Возвращает отдельный логгер для RAG с файловым обработчиком logs/rag.log
+    """
+    logger = logging.getLogger("RAGRetriever")
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        os.makedirs("logs", exist_ok=True)
+        fh = logging.FileHandler("logs/rag.log", encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+    return logger
+
+def save_chunks_txt(data: List[dict], filename: str = "logs/rag_chunks.txt"):
+    """
+    Сохраняет список чанков с их score и текстом в обычный текстовый файл (для анализа).
+    """
+    os.makedirs(os.path.dirname(filename), exist_ok=True)
+    with open(filename, "a", encoding="utf-8") as f:
+        for item in data:
+            f.write(f"chunk_id: {item['chunk_id']}\n")
+            f.write(f"score: {item['score']}\n")
+            f.write(f"text: {item['text']}\n")
+            f.write("-" * 40 + "\n")
+
 class RAGRetriever:
     """
-    Универсальный класс для семантического поиска по базе знаний с поддержкой автозагрузки и автосохранения индекса,
+    Универсальный класс для семантического поиска по базе знаний с поддержкой автозагрузки и автосохранения
     эмбеддингов и чанков. Поддерживает эффективную работу с большими объемами данных и динамическое обновление.
     """
+
     def __init__(self, config: dict):
-        self.logger = logging.getLogger("RAGRetriever")
+        self.logger = get_rag_logger()
         self.file_processor = FileProcessor()
         self.embed_mgr = EmbeddingManager(config.get("embedding_model", "all-MiniLM-L6-v2"))
         self.chunk_tracker = ChunkTracker()
@@ -118,23 +146,53 @@ class RAGRetriever:
         self.logger.info("RAG knowledge base (index, embeddings, chunks) initialized and saved.")
 
     def retrieve_context(self, query: str, max_length: Optional[int] = None) -> str:
-        """Получает наиболее релевантные чанки для запроса."""
+        """
+        Получает наиболее релевантные чанки для запроса.
+        Логирует запрос, id и score чанков, итоговый context.
+        """
+        self.logger.info(f"[RAG] Incoming query: {query!r}")
         if self.index is None or self.embeddings is None or not self.chunks:
             self.logger.error("Knowledge base is not loaded. Please build or load the knowledge base first.")
             raise RuntimeError("Knowledge base not loaded! Run build_knowledge_base or check data files.")
 
         q_emb = self.embed_mgr.encode_single_text(query)
         ids, sims = self.embed_mgr.search_similar(self.index, q_emb, k=20)
+
         # Защита от выхода за границы
-        candidate_chunks = [(i, self.chunks[i]) for i in ids if i < len(self.chunks)]
+        candidate_chunks = [(int(i), self.chunks[int(i)]) for i in ids if int(i) < len(self.chunks)]
+        candidate_info = [
+            {
+                "chunk_id": int(i),
+                "score": float(sims[idx]),
+                "text": self.chunks[int(i)]
+            }
+            for idx, i in enumerate(ids) if int(i) < len(self.chunks)
+        ]
+        # Сохраняем кандидатов в обычный txt
+        save_chunks_txt(candidate_info, filename="logs/rag_chunks.txt")
+
         diverse = self.chunk_tracker.get_diverse_chunks(candidate_chunks)
         selected = diverse[:self.config.get("max_context_chunks", 5)]
 
-        for chunk_id, _ in selected:
-            self.chunk_tracker.track_usage(chunk_id=chunk_id, topic=query)
+        selection_info = []
+        for order, (chunk_id, chunk_text) in enumerate(selected, 1):
+            pos = list(ids).index(chunk_id) if chunk_id in ids else -1
+            score = float(sims[pos]) if pos != -1 else float("nan")
+            selection_info.append({
+                "selected_order": int(order),
+                "chunk_id": int(chunk_id),
+                "score": float(score),
+                "text": chunk_text
+            })
+            self.chunk_tracker.track_usage(chunk_id=int(chunk_id), topic=query)
+
+        # Сохраняем выбранные чанки в отдельный txt
+        save_chunks_txt(selection_info, filename="logs/rag_selected_chunks.txt")
 
         context = "\n\n".join([chunk for _, chunk in selected])
-        self.logger.debug(f"Selected {len(selected)} diverse chunks for topic: {query}")
+        self.logger.info(f"[RAG] Query: {query!r}\nSelected chunks count: {len(selection_info)}")
+        self.logger.debug(f"[RAG] Final context for query: {query!r}\n{context[:2000]}")
+
         return context
 
     def update_knowledge_base(self, new_content: str, source: str = None):
