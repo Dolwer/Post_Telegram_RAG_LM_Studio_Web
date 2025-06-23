@@ -1,5 +1,3 @@
-# main.py
-
 import sys
 import signal
 import time
@@ -232,19 +230,35 @@ class TelegramRAGSystem:
                     media_file=media_file
                 )
                 if not prompt or not prompt.strip():
+                    self.logger.error(f"Prompt building failed for topic '{topic}'.\nTopic: {topic}\nContext: {full_context[:500]}")
                     raise ValueError("Prompt building failed (empty prompt)")
 
-                # 6. Генерация контента
-                content = self.lm_client.generate_content(prompt)
+                # 6. Логируем промпт для диагностики
+                self.logger.debug(f"Prompt to LM Studio for topic '{topic}':\n{prompt[:1500]}")
+
+                # 7. Генерация контента - используем retry
+                max_lm_retries = self.config["lm_studio"].get("max_retries", 3)
+                try:
+                    content = self.lm_client.generate_with_retry(prompt, max_retries=max_lm_retries)
+                except Exception as e:
+                    self.logger.error(f"LM Studio generation failed after retries for topic '{topic}': {e}")
+                    self.logger.error(f"Prompt (truncated): {prompt[:2000]}")
+                    raise ValueError(f"LM Studio generation failed after retries: {e}")
+
+                # 8. Логируем результат LM Studio
+                self.logger.debug(f"LM Studio response for topic '{topic}': {content[:1500]}")
+
                 if not content or not content.strip():
+                    self.logger.error(f"Generated content is empty for topic '{topic}'.\nPrompt: {prompt[:1000]}\nTopic: {topic}\nContext: {full_context[:1000]}")
                     raise ValueError("Generated content is empty")
 
-                # 7. Валидация контента
+                # 9. Валидация контента
                 validated_content = self.content_validator.validate_content(content, has_media=bool(media_file))
                 if not validated_content or not validated_content.strip():
+                    self.logger.error(f"Validated content is empty for topic '{topic}'.\nRaw content: {content[:1000]}")
                     raise ValueError("Validated content is empty")
 
-                # 8. Публикация в Telegram с повтором (retry)
+                # 10. Публикация в Telegram с повтором (retry)
                 success = False
                 max_retries = self.config["telegram"].get("max_retries", 3)
                 for attempt in range(1, max_retries + 1):
@@ -290,6 +304,7 @@ class TelegramRAGSystem:
 if __name__ == "__main__":
     system = TelegramRAGSystem()
     system.run()
+
 
 # modules/content_generation/content_validator.py
 
@@ -394,6 +409,8 @@ class LMStudioClient:
         self.max_chars_with_media = config.get("max_chars_with_media", 4096)
         self.logger = logging.getLogger("LMStudioClient")
         self.history: List[Dict[str, str]] = []
+        self.top_p = config.get("top_p", None)
+        self.top_k = config.get("top_k", None)
 
         if self.system_message and len(self.system_message) > 1000:
             self.logger.warning("System message unusually long.")
@@ -401,111 +418,134 @@ class LMStudioClient:
         self.logger.info(f"LMStudioClient initialized with model '{model}' and config: {config}")
 
     def check_connection(self) -> bool:
-        """
-        Проверка доступности LM Studio и наличия нужной модели.
-        """
         try:
-            response = requests.get(f"{self.base_url}/v1/models", timeout=5)
-            response.raise_for_status()
+            self.logger.debug(f"Checking LM Studio connection at: {self.base_url}/models")
+            response = requests.get(f"{self.base_url}/models", timeout=5)
+            self.logger.debug(f"Check connection raw response: {response.text}")
             models = response.json().get("data", [])
             is_ok = any(m["id"] == self.model for m in models)
-            self.logger.info("LM Studio connection OK" if is_ok else f"Model '{self.model}' not found in LM Studio")
+            self.logger.info("LM Studio connection OK" if is_ok else "Model not found in LM Studio")
             return is_ok
         except Exception as e:
             self.logger.error("Failed to connect to LM Studio", exc_info=True)
             return False
 
     def get_model_info(self) -> Dict[str, Any]:
-        """
-        Получить json-информацию о моделях LM Studio.
-        """
         try:
-            resp = requests.get(f"{self.base_url}/v1/models")
-            resp.raise_for_status()
+            self.logger.debug(f"Requesting LM Studio model info at: {self.base_url}/models")
+            resp = requests.get(f"{self.base_url}/models")
+            self.logger.debug(f"Model info raw response: {resp.text}")
             return resp.json()
         except Exception as e:
             self.logger.error("Model info retrieval failed", exc_info=True)
             return {}
 
-    def generate_content(
-        self,
-        prompt: str,
-        max_tokens: Optional[int] = None,
-        with_media: bool = False
-    ) -> str:
-        """
-        Основной метод генерации текста.
-        Сначала пытается chat endpoint, если неудача - fallback на обычный completions endpoint.
-        """
+    def generate_content(self, prompt: str, max_tokens: Optional[int] = None, with_media=False) -> str:
         max_tokens = max_tokens or self.max_tokens
-
         # Compose prompt with system message
         full_prompt = ""
         if self.system_message:
             full_prompt += f"{self.system_message}\n"
         full_prompt += prompt
 
-        # Попробовать chat endpoint первым
-        url_chat = f"{self.base_url}/v1/chat/completions"
-        headers = {"Content-Type": "application/json"}
+        # Log prompt diagnostics
+        self.logger.debug(f"Prompt length: {len(full_prompt)}")
+        self.logger.debug(f"Estimated prompt tokens: {self.estimate_tokens(full_prompt)}")
+        self.logger.debug(f"Prompt for LM Studio (truncated): {full_prompt[:2000]}")
+        self.logger.debug(f"max_tokens: {max_tokens}, with_media: {with_media}")
+
+        # Try chat endpoint first
+        chat_url = f"{self.base_url}/v1/chat/completions"
+        messages = []
+        if self.system_message:
+            messages.append({"role": "system", "content": self.system_message})
+        # Add history if any (not required for completions fallback)
+        if self.history_limit and self.history:
+            messages.extend(self.history[-self.history_limit * 2:])
+        messages.append({"role": "user", "content": prompt})
+
         payload_chat = {
             "model": self.model,
-            "messages": [{"role": "user", "content": full_prompt}],
+            "messages": messages,
             "temperature": self.temperature,
             "max_tokens": max_tokens
         }
-        try:
-            response = requests.post(url_chat, json=payload_chat, timeout=self.timeout, headers=headers)
-            response.raise_for_status()
-            result = response.json()
-            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if self.top_p is not None:
+            payload_chat["top_p"] = self.top_p
+        if self.top_k is not None:
+            payload_chat["top_k"] = self.top_k
 
-            # Fallback если пусто или chat endpoint не поддерживается
+        self.logger.debug(f"[LMStudioClient] Sending chat payload to {chat_url}: {payload_chat}")
+
+        try:
+            response = requests.post(chat_url, json=payload_chat, timeout=self.timeout)
+            self.logger.debug(f"LM Studio raw response (chat): {response.text[:2000]}")
+            response.raise_for_status()
+            try:
+                result = response.json()
+            except Exception as e:
+                self.logger.error(f"Failed to decode LM Studio chat response as JSON: {e}")
+                result = {}
+            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            self.logger.debug(f"Parsed chat-completions text: {text[:1000]}")
+
+            # Fallback if empty or not supported
             if not text:
                 self.logger.warning("Empty response from chat endpoint, fallback to completions endpoint")
-                url_comp = f"{self.base_url}/v1/completions"
-                payload_comp = {
+                comp_url = f"{self.base_url}/v1/completions"
+                payload = {
                     "model": self.model,
                     "prompt": full_prompt,
                     "max_tokens": max_tokens,
                     "temperature": self.temperature,
                     "stream": False
                 }
-                response = requests.post(url_comp, json=payload_comp, timeout=self.timeout, headers=headers)
-                response.raise_for_status()
-                result = response.json()
-                text = result.get("choices", [{}])[0].get("text", "")
+                if self.top_p is not None:
+                    payload["top_p"] = self.top_p
+                if self.top_k is not None:
+                    payload["top_k"] = self.top_k
+                self.logger.debug(f"[LMStudioClient] Sending completions payload to {comp_url}: {payload}")
+                comp_resp = requests.post(comp_url, json=payload, timeout=self.timeout)
+                self.logger.debug(f"LM Studio raw response (completions): {comp_resp.text[:2000]}")
+                comp_resp.raise_for_status()
+                try:
+                    comp_result = comp_resp.json()
+                except Exception as e:
+                    self.logger.error(f"Failed to decode LM Studio completions response as JSON: {e}")
+                    comp_result = {}
+                text = comp_result.get("choices", [{}])[0].get("text", "")
+                self.logger.debug(f"Parsed completions text: {text[:1000]}")
 
             limit = self.max_chars_with_media if with_media else self.max_chars
             if not self.validate_response_length(text, limit):
                 self.logger.warning(f"Truncating response to {limit} chars")
                 text = text[:limit]
+            if text:
+                self.add_to_history(prompt, text)
+            else:
+                self.logger.warning("LM Studio returned an empty text after both endpoints.")
             return text.strip()
         except Exception as e:
-            self.logger.error("Content generation failed", exc_info=True)
+            self.logger.error(f"Content generation failed on both endpoints. Exception: {e}", exc_info=True)
             raise
 
-    def generate_with_retry(
-        self,
-        prompt: str,
-        max_retries: int = 3,
-        with_media: bool = False
-    ) -> str:
-        """
-        Повторяет генерацию несколько раз в случае ошибки.
-        """
+    def generate_with_retry(self, prompt: str, max_retries: int = 3, with_media=False) -> str:
+        last_err = None
         for attempt in range(1, max_retries + 1):
             try:
-                return self.generate_content(prompt, with_media=with_media)
+                self.logger.debug(f"LM Studio generation attempt {attempt}/{max_retries}")
+                text = self.generate_content(prompt, with_media=with_media)
+                if text and text.strip():
+                    self.logger.debug(f"LM Studio successful generation on attempt {attempt}")
+                    return text
+                else:
+                    self.logger.warning(f"Empty LM Studio response on attempt {attempt}/{max_retries}")
             except Exception as e:
-                self.logger.warning(f"Retry {attempt}/{max_retries} for prompt generation")
-                if attempt == max_retries:
-                    raise
+                last_err = e
+                self.logger.warning(f"Retry {attempt}/{max_retries} for prompt generation, error: {e}")
+        raise ValueError(f"LM Studio did not generate content after {max_retries} attempts: {last_err}")
 
     def validate_response_length(self, text: str, max_length: int = None) -> bool:
-        """
-        Проверяет, не превышает ли текст максимальную длину.
-        """
         if max_length is None:
             max_length = self.max_chars
         if len(text) <= max_length:
@@ -514,9 +554,6 @@ class LMStudioClient:
         return False
 
     def request_shorter_version(self, original_prompt: str, current_length: int, target_length: int) -> str:
-        """
-        Просит LM Studio сделать текст короче, если превышен лимит.
-        """
         instruction = (
             f"\n\n[ИНСТРУКЦИЯ]: Сократи предыдущий текст до {target_length} символов. "
             "Сохрани ключевые идеи и структуру, но сделай более компактным."
@@ -525,26 +562,20 @@ class LMStudioClient:
         return self.generate_with_retry(new_prompt)
 
     def estimate_tokens(self, text: str) -> int:
-        """
-        Грубая оценка числа токенов (1 токен ≈ 4 символа).
-        """
+        # Примерная оценка: 1 токен ≈ 4 символа
         return int(len(text) / 4)
 
     def set_generation_parameters(self, temperature: float, top_p: float = None, top_k: int = None):
-        """
-        Устанавливает параметры генерации.
-        """
         self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
         self.logger.info(f"Set generation temperature to {temperature}")
-        if top_p:
+        if top_p is not None:
             self.logger.info(f"Set top_p to {top_p}")
-        if top_k:
+        if top_k is not None:
             self.logger.info(f"Set top_k to {top_k}")
 
     def get_generation_stats(self) -> dict:
-        """
-        Возвращает параметры генерации (для мониторинга/отладки).
-        """
         return {
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
@@ -552,35 +583,32 @@ class LMStudioClient:
             "max_chars": self.max_chars,
             "max_chars_with_media": self.max_chars_with_media,
             "history_limit": self.history_limit,
-            "system_message": self.system_message
+            "system_message": self.system_message,
+            "top_p": self.top_p,
+            "top_k": self.top_k
         }
 
     def clear_conversation_history(self):
-        """
-        Очищает историю диалога.
-        """
         self.history = []
         self.logger.debug("Conversation history cleared.")
 
     def add_to_history(self, user_message: str, bot_message: str):
-        """
-        Добавляет сообщения в историю диалога.
-        """
-        self.history.append({"user": user_message, "bot": bot_message})
-        if self.history_limit and len(self.history) > self.history_limit:
-            self.history = self.history[-self.history_limit:]
+        self.history.append({"role": "user", "content": user_message})
+        self.history.append({"role": "assistant", "content": bot_message})
+        if self.history_limit and len(self.history) > self.history_limit * 2:
+            self.history = self.history[-self.history_limit * 2:]
 
     def health_check(self) -> dict:
-        """
-        Проверяет работоспособность сервера LM Studio.
-        """
         try:
+            self.logger.debug(f"Checking LM Studio health at: {self.base_url}/health")
             resp = requests.get(f"{self.base_url}/health")
-            resp.raise_for_status()
+            self.logger.debug(f"Health check response: {resp.text}")
             return resp.json()
         except Exception as e:
             self.logger.warning("Health check failed", exc_info=True)
             return {"status": "unreachable"}
+
+# prompt_builder.py
 
 import os
 import random
@@ -846,7 +874,7 @@ class ConfigManager:
             raise IOError(f"Error reading {label}") from e
 
 
-# log.py
+# logs.py
 
 import logging
 from logging.handlers import RotatingFileHandler
@@ -1233,3 +1261,181 @@ class StateManager:
         Печатает состояние в лог (информационный уровень).
         """
         self.logger.info(f"STATE DUMP:\n{self.dump_state()}")
+
+
+# config.json
+
+{
+    "version": "1.0.0",
+    "environment": "production",
+    "telegram": {
+        "bot_token_file": "config/telegram_token.txt",
+        "channel_id_file": "config/telegram_channel.txt",
+        "retry_attempts": 3,
+        "retry_delay": 3.0,
+        "enable_preview": true,
+        "max_caption_length": 1024
+    },
+    "language_model": {
+        "url": "http://localhost:1234/v1/chat/completions",
+        "model_name": "qwen3-14b",
+        "max_tokens": 4096,
+        "max_chars": 20000,
+        "temperature": 0.7,
+        "timeout": 1500,
+        "history_limit": 3,
+        "system_message": "Вы — эксперт по бровям и ресницам.",
+        "max_chars_with_media": 4096
+    },
+    "lm_studio": {
+        "base_url": "http://localhost:1234/v1/chat/completions",
+        "model": "qwen3-14b",
+        "max_tokens": 4096,
+        "max_chars": 20000,
+        "temperature": 0.7,
+        "timeout": 1500,
+        "history_limit": 3,
+        "system_message": "Вы — эксперт по бровям и ресницам.",
+        "max_chars_with_media": 4096
+    },
+    "retrieval": {
+        "chunk_size": 500,
+        "overlap": 100,
+        "top_k_title": 2,
+        "top_k_faiss": 8,
+        "top_k_final": 3,
+        "embedding_model": "all-MiniLM-L6-v2",
+        "cross_encoder": "cross-encoder/stsb-roberta-large"
+    },
+    "rag": {
+        "chunk_size": 500,
+        "chunk_overlap": 100,
+        "top_k_title": 2,
+        "top_k_faiss": 8,
+        "top_k_final": 3,
+        "embedding_model": "all-MiniLM-L6-v2",
+        "cross_encoder": "cross-encoder/stsb-roberta-large"
+    },
+    "system": {
+        "chunk_usage_limit": 10,
+        "usage_reset_days": 7,
+        "diversity_boost": 0.3,
+        "max_retries": 3,
+        "backoff_factor": 1.5
+    },
+    "paths": {
+        "data_dir": "data",
+        "log_dir": "logs",
+        "inform_dir": "inform",
+        "media_dir": "media",
+        "index_file": "data/faiss_index.idx",
+        "context_file": "data/faiss_contexts.json",
+        "usage_stats_file": "data/usage_statistics.json",
+        "processed_topics_file": "data/state.json",
+        "prompt_folders": [
+            "data/prompt_1",
+            "data/prompt_2",
+            "data/prompt_3"
+        ]
+    },
+    "temp_files": {
+        "cleanup_interval_hours": 24,
+        "max_size_mb": 1000,
+        "min_free_space_mb": 500
+    },
+    "logging": {
+        "level": "INFO",
+        "file_max_mb": 5,
+        "backup_count": 3
+    },
+    "content_validator": {
+        "remove_tables": true,
+        "max_length_no_media": 4096,
+        "max_length_with_media": 1024
+    },
+    "schedule": {
+        "interval_seconds": 900
+    },
+    "external_apis": {
+        "serper.api_key": "92c04c9d14f70d29047baa2dae0330ff475e0adb",
+        "serper_endpoint": "https://google.serper.dev/search",
+        "serper_results_limit": 10
+    },
+    "serper": {
+        "api_key_file": "config/serper_api_key.txt",
+        "endpoint": "https://google.serper.dev/search",
+        "results_limit": 10
+    },
+
+    "processing": {
+        "max_tasks_per_run": 1,
+        "max_errors": 5,
+        "error_backoff_sec": 30,
+        "max_processing_time_sec": 300,
+        "shutdown_on_critical": true
+    }
+}
+
+# Архитектура проекта
+
+Структура проекта
+
+ project_root/
+├── main.py
+├── logs.py
+├── config/
+│   ├── config.json
+│   ├── telegram_token.txt
+│   └── telegram_channel.txt
+├── data/
+│   ├── prompt_1/
+│   ├── prompt_2/
+│   ├── prompt_3/
+│   ├── topics.txt
+│   └── state.json
+├── inform/
+├── media/
+├── modules/
+│   ├── rag_system/
+│   │   ├── embedding_manager.py           # Менеджер эмбеддингов
+│   │   ├── file_processor_manager.py      # Менеджер парсеров и хуков
+│   │   ├── hook_manager.py                # Менеджер хуков (SOLID, meta, error handling)
+│   │   ├── rag_file_utils.py              # Высокоуровневая обёртка для batch/аналитики
+│   │   ├── rag_retriever.py               # Индексация и поиск по базе знаний
+│   │   ├── file_processors/               # Парсеры по форматам файлов
+│   │   │   ├── rag_txt.py
+│   │   │   ├── rag_csv.py
+│   │   │   ├── rag_excel.py
+│   │   │   ├── rag_pdf.py
+│   │   │   ├── rag_docx.py
+│   │   │   ├── rag_html.py
+│   │   │   ├── rag_markdown.py
+│   │   │   ├── rag_json.py
+│   │   │   ├── rag_pptx.py
+│   │   │   ├── rag_audio.py
+│   │   │   ├── rag_video.py
+│   │   │   ├── rag_fallback_textract.py
+│   │   │   └── __init__.py
+│   │   └── hooks/                         # Хуки для очистки/нормализации
+│   │       ├── base.py
+│   │       ├── lower_case.py
+│   │       ├── remove_stopwords.py
+│   │       ├── remove_punctuation.py
+│   │       ├── strip_html.py
+│   │       ├── strip_markdown.py
+│   │       ├── remove_empty_lines.py
+│   │       ├── remove_extra_spaces.py
+│   │       ├── custom_replace.py
+│   │       └── __init__.py
+│   ├── content_generation/
+│   │   ├── prompt_builder.py
+│   │   ├── lm_client.py
+│   │   └── content_validator.py
+│   ├── external_apis/
+│   │   ├── web_search.py
+│   │   └── telegram_client.py
+│   └── utils/
+│       ├── config_manager.py
+│       ├── file_processor.py
+│       └── media_handler.py
+└── requirements.txt
