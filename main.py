@@ -46,6 +46,7 @@ class TelegramRAGSystem:
         }
         try:
             log_system_info(self.logger)
+            self.logger.info("🚀 Initializing TelegramRAGSystem...")
             self.config_manager = ConfigManager(config_path)
             self.config = self.config_manager.config
             self._validate_config()
@@ -54,6 +55,7 @@ class TelegramRAGSystem:
             if not self.lm_client.check_connection():
                 self.logger.critical("LM Studio not available or model not loaded, aborting.")
                 sys.exit(1)
+            self.logger.info("Configuration validated successfully.")
         except Exception as e:
             self.logger.critical("Failed during initialization", exc_info=True)
             sys.exit(1)
@@ -90,17 +92,21 @@ class TelegramRAGSystem:
         )
 
     def _load_topics(self):
-        topics_file = os.path.join(self.config["paths"]["data_dir"], "topics.txt")
-        if os.path.isfile(topics_file):
-            with open(topics_file, "r", encoding="utf-8") as f:
-                topics = [line.strip() for line in f if line.strip()]
-            self.state_manager.add_topics(topics)
-            self.logger.info(f"{len(topics)} topics loaded from file.")
+        # Загружаем новые топики только если очередь пуста
+        if not self.state_manager.get_unprocessed_topics():
+            topics_file = os.path.join(self.config["paths"]["data_dir"], "topics.txt")
+            if os.path.isfile(topics_file):
+                with open(topics_file, "r", encoding="utf-8") as f:
+                    topics = [line.strip() for line in f if line.strip()]
+                self.state_manager.add_topics(topics)
+                self.logger.info(f"Loaded {len(topics)} topics from {topics_file} into state.json")
+            else:
+                self.logger.warning("No topics file found.")
         else:
-            self.logger.warning("No topics file found.")
+            self.logger.info("Unprocessed topics already present in state.json")
 
     def _graceful_shutdown(self, *_):
-        self.logger.warning("Received shutdown signal.")
+        self.logger.warning("Shutdown signal received. Exiting loop...")
         self.shutdown_requested = True
 
     def _combine_context(self, topic: str, topic_logger) -> str:
@@ -115,6 +121,9 @@ class TelegramRAGSystem:
         try:
             web_results = self.web_search.search(topic)
             web = self.web_search.extract_content(web_results)
+            # Сохраняем web-материал для аудита
+            if web.strip():
+                self.web_search.save_to_inform(web, topic, source="web")
             topic_logger.info(f"Web search context:\n{web[:2000]}")
         except Exception as e:
             topic_logger.error(f"Failed to retrieve web context: {e}\n{traceback.format_exc()}")
@@ -144,7 +153,6 @@ class TelegramRAGSystem:
         topic_slug = slugify(topic)
         topic_logger = logging.getLogger(f"TopicLogger.{topic_slug}")
         topic_logger.setLevel(logging.DEBUG)
-        # Добавим file handler для топика
         topic_logfile = os.path.join("logs/topics", f"{topic_slug}.log")
         os.makedirs(os.path.dirname(topic_logfile), exist_ok=True)
         if not topic_logger.handlers:
@@ -183,80 +191,85 @@ class TelegramRAGSystem:
                 self.stats["topics"].append(topic_result)
                 return False
 
-            # Основная генерация, с fallback на сокращение при ошибке
-            for attempt in range(2):
+            # Определяем лимиты Telegram для caption/text
+            has_uploadfile = "{UPLOADFILE}" in prompt
+            has_media = bool(media_file) and has_uploadfile
+            max_len = 1024 if has_media else 4096
+
+            min_context_length = 512
+            for attempt in range(3):
                 try:
+                    topic_logger.info(f"Generation attempt {attempt+1}: prompt len={len(prompt)}, context len={len(context)}")
                     response = self.lm_client.generate_with_retry(prompt)
                     if not response or not response.strip():
                         raise ValueError("Empty response from LM Studio")
                     if "prediction-error" in response.lower() or "error:" in response.lower():
                         raise ValueError(f"LM Studio error: {response.strip()[:100]}")
+                    topic_logger.info(f"LM Studio response received, len={len(response)}")
+                    break  # успех
                 except Exception as e:
-                    msg = f"LM Studio generation error: {e}"
-                    topic_logger.error(msg)
-                    if attempt == 0:
-                        topic_logger.warning("Retrying with shortened prompt/context after error.")
-                        context_short = context[:2048]
+                    msg = str(e)
+                    topic_logger.error(f"LM Studio generation error on attempt {attempt+1}: {msg}")
+                    # Если ошибка из-за длины prompt, сокращаем context и пытаемся снова
+                    if ("Prompt too long" in msg or "prompt/messages too long" in msg.lower()) and len(context) > min_context_length:
+                        new_len = max(min_context_length, int(len(context) * 0.7))
+                        topic_logger.warning(f"Prompt too long. Shortening context from {len(context)} to {new_len} chars and retrying...")
+                        context = context[:new_len]
                         try:
-                            prompt_short = self.prompt_builder.build_prompt(topic, context_short, media_file)
-                            response = self.lm_client.generate_with_retry(prompt_short)
+                            prompt = self.prompt_builder.build_prompt(topic, context, media_file)
+                            topic_logger.debug(f"Prompt rebuilt for retry (truncated): {prompt[:1500]}")
                         except Exception as e2:
-                            msg2 = f"Failed to build/generate with short context: {e2}"
-                            topic_logger.error(msg2)
+                            err_msg = f"Prompt rebuild failed after context cut: {e2}"
+                            topic_logger.error(err_msg)
                             topic_result["status"] = "fail"
-                            topic_result["error"] = msg2
+                            topic_result["error"] = err_msg
                             self.stats["fail"] += 1
                             self.stats["topics"].append(topic_result)
                             return False
-                        if not response or not response.strip() or "prediction-error" in response.lower() or "error:" in response.lower():
-                            msg3 = f"LM Studio error on retry: {response.strip() if response else 'empty'}"
-                            topic_logger.error(msg3)
-                            topic_result["status"] = "fail"
-                            topic_result["error"] = msg3
-                            self.stats["fail"] += 1
-                            self.stats["topics"].append(topic_result)
-                            return False
+                        continue
                     else:
+                        # Любая другая ошибка или уже минимальный контекст
+                        topic_logger.error(f"LM Studio unrecoverable error: {msg}")
                         topic_result["status"] = "fail"
                         topic_result["error"] = msg
                         self.stats["fail"] += 1
                         self.stats["topics"].append(topic_result)
                         return False
 
-                topic_logger.debug(f"LM Studio response (truncated): {response[:1500]}")
-                response = self._shorten_if_needed(response, prompt, has_media=bool(media_file), topic_logger=topic_logger)
-                try:
-                    validated = self.content_validator.validate_content(response, has_media=bool(media_file))
-                except Exception as e:
-                    msg = f"Content validation error: {e}"
-                    topic_logger.error(msg)
-                    topic_result["status"] = "fail"
-                    topic_result["error"] = msg
-                    self.stats["fail"] += 1
-                    self.stats["topics"].append(topic_result)
-                    return False
-
-                formatted = self.content_validator.format_for_telegram(validated, max_len=1024 if media_file else 4096)
-                topic_logger.debug(f"Formatted content for Telegram (truncated): {formatted[:1000]}")
-
-                if media_file:
-                    result = self.telegram_client.send_media_message(formatted, media_file)
-                else:
-                    result = self.telegram_client.send_text_message(formatted)
-
-                if result:
-                    topic_logger.info("Topic successfully posted to Telegram.")
-                    topic_result["status"] = "success"
-                    self.stats["success"] += 1
-                else:
-                    msg = "Failed to publish topic to Telegram (API error or content too long)."
-                    topic_logger.error(msg)
-                    topic_result["status"] = "fail"
-                    topic_result["error"] = msg
-                    self.stats["fail"] += 1
-
+            topic_logger.debug(f"LM Studio response (truncated): {response[:1500]}")
+            response = self._shorten_if_needed(response, prompt, has_media=has_media, topic_logger=topic_logger)
+            try:
+                validated = self.content_validator.validate_content(response, has_media=has_media)
+            except Exception as e:
+                msg = f"Content validation error: {e}"
+                topic_logger.error(msg)
+                topic_result["status"] = "fail"
+                topic_result["error"] = msg
+                self.stats["fail"] += 1
                 self.stats["topics"].append(topic_result)
-                return result
+                return False
+
+            formatted = self.content_validator.format_for_telegram(validated, max_len=max_len)
+            topic_logger.debug(f"Formatted content for Telegram (truncated): {formatted[:1000]}")
+
+            if has_media:
+                result = self.telegram_client.send_media_message(formatted, media_file)
+            else:
+                result = self.telegram_client.send_text_message(formatted)
+
+            if result:
+                topic_logger.info("Topic successfully posted to Telegram.")
+                topic_result["status"] = "success"
+                self.stats["success"] += 1
+            else:
+                msg = "Failed to publish topic to Telegram (API error or content too long)."
+                topic_logger.error(msg)
+                topic_result["status"] = "fail"
+                topic_result["error"] = msg
+                self.stats["fail"] += 1
+
+            self.stats["topics"].append(topic_result)
+            return result
 
         except Exception as e:
             msg = f"Unhandled error on topic: {e}\n{traceback.format_exc()}"
@@ -287,22 +300,27 @@ class TelegramRAGSystem:
         self.logger.info("Bot started.")
         heartbeat_counter = 0
         while not self.shutdown_requested:
-            topic = self.state_manager.get_next_unprocessed_topic()
-            if not topic:
-                self.logger.info("No more topics in queue.")
-                break
+            try:
+                topic = self.state_manager.get_next_unprocessed_topic()
+                if not topic:
+                    self.logger.info("No more topics in queue.")
+                    break
 
-            success = self._process_topic(topic)
-            self.state_manager.mark_topic_processed(topic, success=success)
+                self.logger.info(f"Next topic selected: {topic}")
+                success = self._process_topic(topic)
+                self.state_manager.mark_topic_processed(topic, success=success)
 
-            heartbeat_counter += 1
-            if heartbeat_counter % 5 == 0:
-                self._heartbeat(heartbeat_counter)
-                self.state_manager.save_state()
+                heartbeat_counter += 1
+                if heartbeat_counter % 5 == 0:
+                    self._heartbeat(heartbeat_counter)
+                    self.state_manager.save_state()
 
-            interval = self.config["telegram"].get("post_interval", 900)
-            self.logger.debug(f"Sleeping for {interval}s before next topic...")
-            time.sleep(interval)
+                interval = self.config["telegram"].get("post_interval", 900)
+                self.logger.debug(f"Sleeping for {interval}s before next topic...")
+                time.sleep(interval)
+            except Exception as e:
+                self.logger.error(f"Exception in processing loop: {e}\n{traceback.format_exc()}")
+                continue
 
         self._log_summary()
         self.logger.info("Bot shutdown complete.")
