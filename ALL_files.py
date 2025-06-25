@@ -1,15 +1,12 @@
 # участок кода файла main.py
-
 import sys
 import signal
 import time
-import logging
 import os
 
 from modules.utils.config_manager import ConfigManager
 from modules.utils.logs import get_logger, log_system_info
 from modules.utils.state_manager import StateManager
-from modules.utils.media_handler import MediaHandler
 from modules.rag_system.rag_retriever import RAGRetriever
 from modules.external_apis.telegram_client import TelegramClient
 from modules.external_apis.web_search import WebSearchClient
@@ -34,24 +31,7 @@ class MonitoringService:
     def report(self):
         self.logger.info(f"[MONITOR] Stats: Success: {self.topics_processed}, Failed: {self.topics_failed}")
 
-class RAGIngestionService:
-    def __init__(self, rag_retriever, logger):
-        self.rag_retriever = rag_retriever
-        self.logger = logger
-
-    def build_knowledge_base(self, folder):
-        try:
-            self.rag_retriever.process_inform_folder(folder)
-            self.rag_retriever.build_knowledge_base()
-            self.logger.info("Initial RAG knowledge base built.")
-        except Exception as e:
-            self.logger.error("Knowledge base build failed", exc_info=True)
-            raise
-
 class TelegramRAGSystem:
-    TELEGRAM_TEXT_LIMIT = 4096
-    TELEGRAM_CAPTION_LIMIT = 1024
-
     def __init__(self, config_path: str = "config/config.json"):
         self.logger = get_logger("Main")
         self.logger.info("🚀 Initializing TelegramRAGSystem...")
@@ -83,7 +63,6 @@ class TelegramRAGSystem:
             self.rag_retriever = RAGRetriever(config=self.config["rag"])
             self.state_manager = StateManager(state_file="data/state.json")
             self.monitoring = MonitoringService(self.logger)
-            self.ingestion = RAGIngestionService(self.rag_retriever, self.logger)
 
             self.lm_client = LMStudioClient(
                 base_url=self.config["lm_studio"]["base_url"],
@@ -105,10 +84,6 @@ class TelegramRAGSystem:
                 endpoint=serper_endpoint,
                 results_limit=serper_results_limit
             )
-            self.media_handler = MediaHandler(
-                media_folder=self.config["paths"].get("media_dir", "media"),
-                config=self.config
-            )
 
             token = self.config_manager.get_telegram_token()
             channel_id = self.config_manager.get_telegram_channel_id()
@@ -117,7 +92,6 @@ class TelegramRAGSystem:
                 channel_id=channel_id,
                 config=self.config["telegram"]
             )
-
         except Exception as e:
             self.logger.critical("Component initialization failed", exc_info=True)
             sys.exit(1)
@@ -155,6 +129,12 @@ class TelegramRAGSystem:
             self.logger.info("No more topics to process.")
         return topic
 
+    def truncate_rag_context(self, rag_context: str, limit: int = 10000) -> str:
+        if rag_context and len(rag_context) > limit:
+            self.logger.warning(f"RAG context too long ({len(rag_context)} > {limit}), truncating.")
+            return rag_context[:limit] + "\n... [RAG контекст обрезан до 10 000 символов]"
+        return rag_context
+
     def combine_contexts(self, rag_context: str, web_context: str) -> str:
         if not rag_context and not web_context:
             return ""
@@ -186,52 +166,27 @@ class TelegramRAGSystem:
                 break
 
             try:
-                # 1. Поиск контекста в RAG
                 rag_context = self.rag_retriever.retrieve_context(topic)
-                if rag_context is None:
-                    self.logger.warning(f"RAG context retrieval returned None for topic: {topic}")
-                    raise ValueError("RAG context retrieval returned None")
+                rag_context = self.truncate_rag_context(rag_context, 10000)  # Ограничение RAG контекста до 10k
+
                 if not isinstance(rag_context, str) or not rag_context.strip():
-                    self.logger.warning(f"RAG context is empty for topic: {topic}")
+                    self.logger.error(f"RAG context is empty for topic: {topic}")
+                    self.update_processing_state(topic, success=False)
+                    self.monitoring.log_failure(topic, "RAG context is empty")
+                    continue
 
-                # 2. Web-поиск дополнительной информации
                 web_results = self.web_search.search(topic)
-                if web_results is None:
-                    self.logger.warning(f"Web search returned None for topic: {topic}")
-                    raise ValueError("Web search returned None")
-                web_context = self.web_search.extract_content(web_results)
-                if not isinstance(web_context, str) or not web_context.strip():
-                    self.logger.warning(f"Web context is empty for topic: {topic}")
+                web_context = self.web_search.extract_content(web_results) if web_results else ""
+                if not isinstance(web_context, str):
+                    web_context = ""
 
-                # 3. Объединение контекстов
                 full_context = self.combine_contexts(rag_context, web_context)
                 self.logger.debug(f"[{topic}] full_context length: {len(full_context)}, preview: {full_context[:300]}")
 
-                # 4. Выбор медиафайла (опционально)
-                media_file = None
-                try:
-                    media_file = self.media_handler.get_random_media_file()
-                    if media_file and not self.media_handler.validate_media_file(media_file):
-                        self.logger.warning(f"Media file {media_file} is not valid. Skipping media.")
-                        media_file = None
-                except Exception as e:
-                    self.logger.warning(f"Media handler error: {str(e)}")
-
-                # 5. Сборка промпта с распаковкой кортежа (prompt, has_uploadfile, prompt_template)
-                # PromptBuilder должен возвращать prompt, has_uploadfile, prompt_template
-                prompt, has_uploadfile, prompt_template = self.prompt_builder.build_prompt(
+                prompt, prompt_template = self.prompt_builder.build_prompt(
                     topic=topic,
-                    context=full_context,
-                    media_file=media_file
+                    context=full_context
                 )
-
-                # 6. Обрезка context для Telegram (отдельно для Telegram, не для LM Studio!)
-                max_context_length = self.TELEGRAM_CAPTION_LIMIT if has_uploadfile else self.TELEGRAM_TEXT_LIMIT
-                if len(full_context) > max_context_length:
-                    self.logger.warning(
-                        f"Context too long ({len(full_context)} > {max_context_length}) for topic: {topic}. Truncating."
-                    )
-                    full_context = full_context[:max_context_length]
 
                 if not prompt or not prompt.strip():
                     self.logger.error(f"Prompt building failed (empty) for topic '{topic}'.")
@@ -241,64 +196,44 @@ class TelegramRAGSystem:
 
                 self.logger.debug(f"Prompt to LM Studio for topic '{topic}':\n{prompt[:1000]}")
 
-                # 7. Генерация контента LM Studio (теперь передаем prompt_template, topic, context, media_file)
                 max_lm_retries = self.config["lm_studio"].get("max_retries", 3)
                 try:
                     content = self.lm_client.generate_with_retry(
                         prompt_template,
                         topic,
                         full_context,
-                        media_file,
-                        max_retries=max_lm_retries,
-                        with_media=has_uploadfile
+                        max_retries=max_lm_retries
                     )
                 except Exception as e:
                     self.logger.error(f"LM Studio generation failed after retries for topic '{topic}': {e}")
-                    self.logger.error(f"Prompt (truncated): {prompt[:1000]}")
                     self.update_processing_state(topic, success=False)
                     self.monitoring.log_failure(topic, f"LM Studio generation failed: {e}")
                     continue
 
-                self.logger.debug(f"LM Studio response for topic '{topic}': {content[:1000]}")
                 if not content or not content.strip():
                     self.logger.error(f"Generated content is empty for topic '{topic}'.")
                     self.update_processing_state(topic, success=False)
                     self.monitoring.log_failure(topic, "Generated content is empty")
                     continue
 
-                # 8. Валидация и подготовка к Telegram
-                try:
-                    validated_content = self.content_validator.validate_content(
-                        content,
-                        has_media=has_uploadfile
-                    )
-                except Exception as e:
-                    self.logger.error(f"Content validation failed for topic '{topic}': {e}")
-                    self.logger.error(f"Raw content: {content[:1000]}")
-                    self.update_processing_state(topic, success=False)
-                    self.monitoring.log_failure(topic, f"Content validation failed: {e}")
-                    continue
-
+                validated_content = self.content_validator.validate_content(content)
                 if not validated_content or not validated_content.strip():
                     self.logger.error(f"Validated content is empty for topic '{topic}'.")
                     self.update_processing_state(topic, success=False)
                     self.monitoring.log_failure(topic, "Validated content is empty")
                     continue
 
-                # 9. Публикация в Telegram
                 success = False
                 max_retries = self.config["telegram"].get("max_retries", 3)
                 for attempt in range(1, max_retries + 1):
                     try:
-                        if has_uploadfile and media_file:
-                            success = self.telegram_client.send_media_message(validated_content, media_file)
-                        else:
-                            success = self.telegram_client.send_text_message(validated_content)
+                        success = self.telegram_client.send_text_message(validated_content)
                         if success:
                             break
                     except Exception as te:
                         self.logger.error(f"Telegram send failed (attempt {attempt}): {te}")
                         time.sleep(2)
+                
                 self.update_processing_state(topic, success)
                 if success:
                     self.monitoring.log_success(topic)
@@ -317,7 +252,9 @@ class TelegramRAGSystem:
         signal.signal(signal.SIGINT, self.graceful_shutdown)
         signal.signal(signal.SIGTERM, self.graceful_shutdown)
         try:
-            self.ingestion.build_knowledge_base(self.config["rag"].get("inform_folder", "inform/"))
+            inform_folder = self.config["rag"].get("inform_folder", "inform/")
+            self.rag_retriever.process_inform_folder(inform_folder)
+            self.rag_retriever.build_knowledge_base()
         except Exception as e:
             self.logger.critical(f"Failed to build RAG knowledge base: {e}", exc_info=True)
             sys.exit(1)
@@ -330,204 +267,218 @@ if __name__ == "__main__":
 
 
 
-# участок кода файла content_validator.py
 
+# участок кода файла content_validator.py
 import logging
 import re
+from typing import Dict, Optional
+import emoji
 
 class ContentValidator:
-    """
-    Валидатор и корректор текста для Telegram-постинга.
-    - Контролирует лимиты Telegram (4096/1024)
-    - Удаляет таблицы (markdown/html), размышления (<think>...</think>), спецсимволы
-    - Экранирует markdown V2, защищает от Telegram-банов
-    - Проверяет смысловую и структурную пригодность результата
-    """
-
     TELEGRAM_TEXT_LIMIT = 4096
-    TELEGRAM_CAPTION_LIMIT = 1024
-    FORBIDDEN_SYMBOLS = ["\u202e", "\u202d", "\u202c"]  # RLO/LRO, опасные для Telegram
-    MARKDOWN_SPECIAL = r'_*[]()~`>#+-=|{}.!'
-    # Для удаления таблиц
-    MARKDOWN_TABLE_PATTERN = re.compile(
-        r'(?:\|[^\n|]+\|[^\n]*\n)+(?:\|[-:| ]+\|[^\n]*\n)+(?:\|[^\n|]+\|[^\n]*\n?)+', re.MULTILINE)
-    HTML_TABLE_PATTERN = re.compile(r'<table[\s\S]*?</table>', re.IGNORECASE)
-    # Для удаления <think>...</think> и вариаций
-    THINK_PATTERN = re.compile(r'<\s*think[^>]*>.*?<\s*/\s*think\s*>', re.IGNORECASE | re.DOTALL)
+    TELEGRAM_SAFE_LIMIT = 4000
+    MIN_CONTENT_LENGTH = 15
+    MAX_EMOJI_FRACTION = 0.5
+    MAX_EMOJI_RUN = 5
 
-    def __init__(self, config=None):
-        self.logger = logging.getLogger("ContentValidator")
+    # Только теги, поддерживаемые Telegram: https://core.telegram.org/bots/api#formatting-options
+    ALLOWED_TAGS = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a"}
+
+    def __init__(self, config: Optional[Dict] = None):
+        self.logger = logging.getLogger(self.__class__.__name__)
         self.config = config or {}
+        self._init_patterns()
 
-    def validate_content(self, text: str, has_media: bool = False) -> str:
-        """
-        Главная функция: полная очистка и валидация текста перед Telegram.
-        Если не проходит лимит — вернуть пустую строку, выше обработать повторный запрос к LLM.
-        """
+    def _init_patterns(self):
+        self.re_tag = re.compile(r'</?([a-zA-Z0-9]+)[^>]*>')
+        self.re_table_md = re.compile(
+            r'(?:\|[^\n|]+\|[^\n]*\n)+(?:\|[-:| ]+\|[^\n]*\n)+(?:\|[^\n|]+\|[^\n]*\n?)+', re.MULTILINE)
+        self.re_table_html = re.compile(r'<table[\s\S]*?</table>', re.IGNORECASE)
+        self.re_think = re.compile(r'<\s*think[^>]*>.*?<\s*/\s*think\s*>', re.IGNORECASE | re.DOTALL)
+        self.re_null = re.compile(r'\b(nan|None|null|NULL)\b', re.I)
+        self.re_unicode = re.compile(r'[\u200b-\u200f\u202a-\u202e]+')
+        self.re_hex = re.compile(r'\\x[0-9a-fA-F]{2}')
+        self.re_unicode_hex = re.compile(r'_x[0-9A-Fa-f]{4}_')
+        self.re_html_entity = re.compile(r'&[a-zA-Z0-9#]+;')
+        self.re_spaces = re.compile(r' {3,}')
+        self.re_invalid = re.compile(r'[^\x09\x0A\x0D\x20-\x7Eа-яА-ЯёЁa-zA-Z0-9.,:;!?()\[\]{}<>@#%^&*_+=/\\|\'\"`~$№-]')
+        self.re_dots = re.compile(r'\.{3,}')
+        self.re_commas = re.compile(r',,+')
+        self.re_js_links = re.compile(r'\[([^\]]+)\]\((javascript|data):[^\)]+\)', re.I)
+        self.re_multi_spaces = re.compile(r' {2,}')
+        self.re_multi_newline = re.compile(r'\n{3,}', re.MULTILINE)
+        self.re_repeated_chars = re.compile(r'(.)\1{10,}')
+        # Markdown to Telegram HTML patterns
+        self.re_md_code_block = re.compile(r'```(.*?)```', re.DOTALL)
+        self.re_md_inline_code = re.compile(r'`([^`\n]+)`')
+        self.re_md_bold1 = re.compile(r'(?<!\*)\*\*([^\*]+)\*\*(?!\*)')
+        self.re_md_bold2 = re.compile(r'__([^_]+)__')
+        self.re_md_italic1 = re.compile(r'(?<!\*)\*([^\*]+)\*(?!\*)')
+        self.re_md_italic2 = re.compile(r'(?<!_)_([^_]+)_(?!_)')
+        self.re_md_strike = re.compile(r'~~([^~]+)~~')
+        self.re_md_url = re.compile(r'\[([^\]]+)\]\((https?://[^\)]+)\)')
+
+    def validate_content(self, text: str) -> str:
         if not isinstance(text, str):
-            self.logger.error("Content for validation is not a string!")
+            self.logger.error("Content validation input is not a string")
             return ""
-
         text = text.strip()
         if not text:
-            self.logger.warning("Empty content on validation entrance.")
+            self.logger.warning("Empty content provided for validation")
             return ""
 
-        text = self._basic_cleanup(text)
+        # 1. Удалить размышления (think)
         text = self.remove_thinking_blocks(text)
-        text = self.remove_tables(text)
-        text = self.clean_html_markdown(text)
-        text = self._remove_forbidden_symbols(text)
-        text = self._deduplicate_empty_lines(text)
-        text = self._fix_markdown(text)
+        # 2. Преобразовать markdown-разметку в Telegram HTML
+        text = self.convert_markdown_to_telegram_html(text)
+        # 3. Оставить только разрешённые html-теги Telegram
+        text = self._remove_forbidden_html_tags(text)
+        # 4. Удалить таблицы, если вдруг остались
+        text = self._remove_tables_and_thinking(text)
+        # 5. Прочая чистка
+        text = self._clean_junk(text)
+        # 6. Ограничить emoji-спам
+        text = self._filter_emoji_spam(text)
+        # 7. Ограничить длину для Telegram
+        text = self._ensure_telegram_limits(text)
 
-        # Лимит Telegram
-        limit = self.TELEGRAM_CAPTION_LIMIT if has_media else self.TELEGRAM_TEXT_LIMIT
-        if len(text) > limit:
-            self.logger.warning(f"Content too long for Telegram ({len(text)} > {limit}), request shorter version in LLM.")
-            return ""  # Нужно повторно запросить у LLM — не резать здесь!
-
-        text = self._final_antiartifacts(text)
-        text = text.strip()
-
-        if not self.validate_content_quality(text):
-            self.logger.warning("Content failed quality check: too short, nonsensical, or spammy.")
+        if not self._content_quality_check(text):
+            self.logger.warning("Content failed quality validation")
             return ""
-
-        return text
-
-    def _basic_cleanup(self, text: str) -> str:
-        # Удаляем мусор: nan, None, NULL, невидимые символы, спецартефакты
-        text = re.sub(r'\b(nan|None|null|NULL)\b', '', text, flags=re.I)
-        text = re.sub(r'[\u200b-\u200f\u202a-\u202e]+', '', text)
-        text = re.sub(r'\\x[0-9a-fA-F]{2}', '', text)
-        text = re.sub(r'_x[0-9A-Fa-f]{4}_', '', text)
-        text = re.sub(r'&[a-zA-Z0-9#]+;', '', text)
-        text = re.sub(r' {3,}', '  ', text)
-        return text
-
-    def _remove_forbidden_symbols(self, text: str) -> str:
-        for sym in self.FORBIDDEN_SYMBOLS:
-            text = text.replace(sym, '')
-        # Можно расширить список запрещённых символов/emoji при необходимости
-        return text
-
-    def _deduplicate_empty_lines(self, text: str) -> str:
-        text = re.sub(r'\n\s*\n+', '\n\n', text)
-        return text.strip('\n')
-
-    def _fix_markdown(self, text: str) -> str:
-        """
-        Экранирует спецсимволы markdown V2 вне кода/ссылок, не трогает code blocks.
-        """
-        def escape_md(match):
-            part = match.group(0)
-            for c in self.MARKDOWN_SPECIAL:
-                part = part.replace(c, '\\' + c)
-            return part
-
-        # Не экранируем в inline code и code blocks
-        segments = []
-        last_end = 0
-        for m in re.finditer(r'(```.*?```|`[^`]*`)', text, flags=re.DOTALL):
-            # До кода
-            if m.start() > last_end:
-                seg = text[last_end:m.start()]
-                segments.append(re.sub(r'([_*[\]()~`>#+\-=|{}.!])', r'\\\1', seg))
-            segments.append(m.group(0))
-            last_end = m.end()
-        if last_end < len(text):
-            seg = text[last_end:]
-            segments.append(re.sub(r'([_*[\]()~`>#+\-=|{}.!])', r'\\\1', seg))
-        fixed = ''.join(segments)
-        fixed = re.sub(r'\\+$', '', fixed)  # Telegram не любит обратные слэши в конце
-        return fixed
-
-    def _final_antiartifacts(self, text: str) -> str:
-        # Удаляем опасные невидимые символы (кроме \n и базовых)
-        text = re.sub(r'[^\x09\x0A\x0D\x20-\x7Eа-яА-ЯёЁa-zA-Z0-9.,:;!?()\[\]{}<>@#%^&*_+=/\\|\'\"`~$№-]', '', text)
-        text = re.sub(r'\.{3,}', '…', text)
-        text = re.sub(r',,+', ',', text)
-        text = re.sub(r' {2,}', ' ', text)
-        text = re.sub(r'\[([^\]]+)\]\((javascript|data):[^\)]+\)', r'\1', text, flags=re.I)
-        text = re.sub(r'[\u200b-\u200f\u202a-\u202e]', '', text)
         return text.strip()
 
-    def remove_tables(self, text: str) -> str:
-        """
-        Удаляет markdown и html таблицы.
-        """
-        text = self.MARKDOWN_TABLE_PATTERN.sub('', text)
-        text = self.HTML_TABLE_PATTERN.sub('', text)
-        return text
-
     def remove_thinking_blocks(self, text: str) -> str:
-        """
-        Удаляет все блоки размышлений <think>...</think> (и вариации).
-        """
-        text = self.THINK_PATTERN.sub('', text)
-        # Иногда размышления могут быть выделены псевдотегами или markdown — добавь по необходимости
-        # Например, <размышление>...</размышление>, [think]...[/think], и т.п.
+        return self.re_think.sub('', text)
+
+    def convert_markdown_to_telegram_html(self, text: str) -> str:
+        # Ссылки [текст](url)
+        text = self.re_md_url.sub(r'<a href="\2">\1</a>', text)
+
+        # Многострочный код (Telegram поддерживает <pre>)
+        text = self.re_md_code_block.sub(lambda m: f"<pre>{self.escape_html(m.group(1).strip())}</pre>", text)
+        # Инлайн-код
+        text = self.re_md_inline_code.sub(lambda m: f"<code>{self.escape_html(m.group(1).strip())}</code>", text)
+        # Жирный
+        text = self.re_md_bold1.sub(r'<b>\1</b>', text)
+        text = self.re_md_bold2.sub(r'<b>\1</b>', text)
+        # Курсив
+        text = self.re_md_italic1.sub(r'<i>\1</i>', text)
+        text = self.re_md_italic2.sub(r'<i>\1</i>', text)
+        # Зачёркнутый
+        text = self.re_md_strike.sub(r'<s>\1</s>', text)
         return text
 
-    def clean_html_markdown(self, text: str) -> str:
-        """
-        Убирает html/markdown теги, кроме безопасных для Telegram.
-        """
-        # Удаляем все html-теги кроме <b>, <i>, <u>, <s>, <code>, <pre>, <a>
-        allowed_tags = ['b','i','u','s','code','pre','a']
-        text = re.sub(r'<(?!\/?(?:' + '|'.join(allowed_tags) + r')\b)[^>]+>', '', text, flags=re.IGNORECASE)
-        # Удаляем markdown заголовки, списки, лишние символы разметки
-        text = re.sub(r'^\s*#.*$', '', text, flags=re.MULTILINE)
-        text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)
-        # Удаляем лишние горизонтальные линии
-        text = re.sub(r'^[-=]{3,}$', '', text, flags=re.MULTILINE)
+    def escape_html(self, text: str) -> str:
+        return (text.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;"))
+
+    def _remove_forbidden_html_tags(self, text: str) -> str:
+        # Удаляем все теги, кроме разрешённых Telegram
+        def _strip_tag(m):
+            tag = m.group(1).lower()
+            if tag in self.ALLOWED_TAGS:
+                return m.group(0)
+            return ''
+        return self.re_tag.sub(_strip_tag, text)
+
+    def _remove_tables_and_thinking(self, text: str) -> str:
+        text = self.re_table_md.sub('', text)
+        text = self.re_table_html.sub('', text)
+        text = self.re_think.sub('', text)
         return text
 
-    def validate_content_quality(self, text: str) -> bool:
-        """
-        Проверка на бессмысленный, пустой или "спамный" результат.
-        """
-        if not text or not isinstance(text, str):
+    def _clean_junk(self, text: str) -> str:
+        text = self.re_null.sub('', text)
+        text = self.re_unicode.sub('', text)
+        text = self.re_hex.sub('', text)
+        text = self.re_unicode_hex.sub('', text)
+        text = self.re_html_entity.sub('', text)
+        text = self.re_spaces.sub('  ', text)
+        text = self.re_invalid.sub('', text)
+        text = self.re_dots.sub('…', text)
+        text = self.re_commas.sub(',', text)
+        text = self.re_js_links.sub(r'\1', text)
+        text = self.re_multi_spaces.sub(' ', text)
+        text = self.re_multi_newline.sub('\n\n', text)
+        return text.strip()
+
+    def _filter_emoji_spam(self, text: str) -> str:
+        # Оставляет эмодзи, но блокирует спам (>50% всего текста — эмодзи, >5 подряд одинаковых)
+        chars = list(text)
+        emojis = [c for c in chars if self._is_emoji(c)]
+        if not text:
+            return ""
+        emoji_fraction = len(emojis) / max(len(chars), 1)
+        if emoji_fraction > self.MAX_EMOJI_FRACTION:
+            self.logger.warning("Too many emojis in text, likely spam")
+            return ""
+        if self._has_long_emoji_run(chars):
+            self.logger.warning("Emoji spam detected (long run)")
+            return ""
+        return text
+
+    def _is_emoji(self, char: str) -> bool:
+        try:
+            return emoji.is_emoji(char)
+        except Exception:
+            return bool(re.match(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0]', char))
+
+    def _has_long_emoji_run(self, chars) -> bool:
+        if not chars:
             return False
-        # Слишком коротко
-        if len(text) < 15:
+        last = None
+        run = 0
+        for c in chars:
+            if self._is_emoji(c):
+                if c == last:
+                    run += 1
+                    if run >= self.MAX_EMOJI_RUN:
+                        return True
+                else:
+                    last = c
+                    run = 1
+            else:
+                last = None
+                run = 0
+        return False
+
+    def _ensure_telegram_limits(self, text: str) -> str:
+        if len(text) <= self.TELEGRAM_TEXT_LIMIT:
+            return text
+        cut = self.TELEGRAM_SAFE_LIMIT
+        for i in range(cut - 100, cut):
+            if i < len(text) and text[i] in [".", "!", "?", "\n\n"]:
+                cut = i + 1
+                break
+        truncated = text[:cut].rstrip()
+        if not truncated.endswith(('...', '…')):
+            truncated += '…'
+        return truncated
+
+    def _content_quality_check(self, text: str) -> bool:
+        if not text or len(text) < self.MIN_CONTENT_LENGTH:
             return False
-        # Только эмодзи или спецсимволы
-        if re.fullmatch(r'[\s.,:;!?()\[\]{}<>@#%^&*_+=/\\|\'\"`~$№0-9a-zA-Zа-яА-ЯёЁ-]*', text):
+        word_count = len(re.findall(r'\w+', text))
+        if word_count < 3:
             return False
-        # Повтор одного и того же предложения/слова
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
-        if len(set(lines)) <= 2 and len(lines) > 1:
-            return False
-        # Слишком много одинаковых символов подряд (спам)
-        if re.search(r'(.)\1{10,}', text):
+        if self.re_repeated_chars.search(text):
             return False
         return True
 
-    # Для тестов и отладки
-    def validate_plain(self, text: str, limit: int = 4096) -> str:
-        text = self._basic_cleanup(text)
-        text = self._deduplicate_empty_lines(text)
-        text = self._remove_forbidden_symbols(text)
-        text = text[:limit]
-        return text.strip()
+
 
 
 # участок кода файла lm_client.py
-
 import logging
 import requests
+import os
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 class LMStudioClient:
-    """
-    Клиент для взаимодействия с LM Studio (локальная LLM).
-    Контролирует лимит payload (prompt + history + system_message) для LM Studio.
-    Не занимается Telegram-валидированием и не режет по лимитам Telegram — только лимит самой LLM!
-    """
-
-    LM_MAX_TOTAL_CHARS = 20000  # Лимит для LM Studio (под свою модель!)
+    LM_MAX_TOTAL_CHARS = 20000
+    TELEGRAM_LIMIT = 4096
 
     def __init__(self, base_url: str, model: str, config: Dict[str, Any]):
         self.base_url = base_url.rstrip("/")
@@ -543,6 +494,12 @@ class LMStudioClient:
         self.history: List[Dict[str, str]] = []
         self._validate_config()
         self._check_health_on_init()
+        self.log_dir_success = "logs/lmstudio/success"
+        self.log_dir_failed = "logs/lmstudio/failed"
+        self.log_dir_prompts = "logs/lmstudio/prompts"
+        os.makedirs(self.log_dir_success, exist_ok=True)
+        os.makedirs(self.log_dir_failed, exist_ok=True)
+        os.makedirs(self.log_dir_prompts, exist_ok=True)
 
     def _validate_config(self):
         assert isinstance(self.max_tokens, int) and self.max_tokens > 0, "max_tokens must be positive integer"
@@ -554,22 +511,34 @@ class LMStudioClient:
             assert isinstance(self.top_k, int) and self.top_k >= 0, "top_k must be non-negative int"
 
     def _check_health_on_init(self):
-        try:
-            status = self.health_check()
-            if status.get("status") != "ok":
-                raise RuntimeError(f"LM Studio health check failed: {status}")
+        status = self.health_check()
+        if status.get("status") != "ok":
+            self.logger.warning(f"LM Studio health check: {status}")
+        else:
             self.logger.info(f"LMStudioClient connected to model '{self.model}'. Health OK.")
-        except Exception as e:
-            self.logger.error(f"LM Studio health check failed: {e}")
-            raise
 
     def health_check(self) -> dict:
         try:
-            resp = requests.get(f"{self.base_url}/health", timeout=10)
+            resp = requests.get(f"{self.base_url}/v1/models", timeout=10)
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            if "data" in data and any(self.model in m.get("id", "") for m in data["data"]):
+                return {"status": "ok"}
+            return {"status": "model_not_found"}
         except Exception as e:
-            self.logger.error(f"Health check failed: {e}")
+            self.logger.warning(f"Health check fallback: /v1/models endpoint not found, trying /v1/chat/completions dummy call.")
+            try:
+                payload = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                    "temperature": 0,
+                }
+                resp = requests.post(f"{self.base_url}/v1/chat/completions", json=payload, timeout=10)
+                if resp.status_code in (200, 400):
+                    return {"status": "ok"}
+            except Exception as e2:
+                self.logger.error(f"Health check failed: {e2}")
             return {"status": "unreachable"}
 
     def clear_conversation_history(self):
@@ -581,14 +550,10 @@ class LMStudioClient:
             self.history.append({"role": "user", "content": user_message})
         if bot_message and isinstance(bot_message, str) and bot_message.strip():
             self.history.append({"role": "assistant", "content": bot_message})
-        # Trim to the last N exchanges
         if self.history_limit > 0 and len(self.history) > self.history_limit * 2:
             self.history = self.history[-self.history_limit * 2:]
 
     def _clean_history(self) -> List[Dict[str, str]]:
-        """
-        Возвращает только валидные последние сообщения, проверяет структуру.
-        """
         clean = []
         for m in self.history[-self.history_limit * 2:]:
             if (
@@ -603,23 +568,16 @@ class LMStudioClient:
                 self.logger.warning(f"Skipping invalid message in LLM history: {m}")
         return clean
 
-    def _truncate_context_for_llm(self, prompt_template: str, topic: str, context: str, media_file: Optional[str]) -> str:
-        """
-        Подбирает длину context так, чтобы prompt + history + system_message влезли в LM Studio лимит.
-        Обрезает context, если надо.
-        """
-        # Подставляем все плейсхолдеры кроме {CONTEXT}
+    def _truncate_context_for_llm(self, prompt_template: str, topic: str, context: str) -> str:
         replacements = {
             "{TOPIC}": topic.strip(),
             "{CONTEXT}": "CONTEXT_PLACEHOLDER",
-            "{UPLOADFILE}": media_file.strip() if media_file else "",
         }
         prompt_wo_context = prompt_template
         for key, value in replacements.items():
             prompt_wo_context = prompt_wo_context.replace(key, value)
         prompt_wo_context_len = len(prompt_wo_context.replace("CONTEXT_PLACEHOLDER", ""))
 
-        # Считаем размер истории и system_message
         messages = []
         if self.system_message:
             messages.append({"role": "system", "content": self.system_message})
@@ -635,38 +593,32 @@ class LMStudioClient:
             context = context[:available]
         return context
 
-    def _build_messages(self, prompt_template: str, topic: str, context: str, media_file: Optional[str]) -> List[Dict[str, str]]:
-        """
-        Собирает сообщения для LLM API, применяет лимиты.
-        """
-        context = self._truncate_context_for_llm(prompt_template, topic, context, media_file)
+    def _build_messages(self, prompt_template: str, topic: str, context: str) -> List[Dict[str, str]]:
+        context = self._truncate_context_for_llm(prompt_template, topic, context)
         replacements = {
             "{TOPIC}": topic.strip(),
             "{CONTEXT}": context,
-            "{UPLOADFILE}": media_file.strip() if media_file else "",
         }
         prompt = prompt_template
         for key, value in replacements.items():
             prompt = prompt.replace(key, value)
         prompt = prompt.replace("nan", "").strip()
-        # Формируем историю
+        
         messages = []
         if self.system_message:
             messages.append({"role": "system", "content": self.system_message})
         messages.extend(self._clean_history())
         messages.append({"role": "user", "content": prompt})
-        # Ещё раз проверяем лимит
+        
         total_chars = sum(len(m["content"]) for m in messages)
         if total_chars > self.LM_MAX_TOTAL_CHARS:
             self.logger.warning(f"Total LLM payload too long ({total_chars} > {self.LM_MAX_TOTAL_CHARS}), trimming prompt/history")
-            # Обрезаем prompt
             excess = total_chars - self.LM_MAX_TOTAL_CHARS
             if len(messages[-1]["content"]) > excess:
                 messages[-1]["content"] = messages[-1]["content"][:len(messages[-1]["content"]) - excess]
             else:
-                # Убираем старые истории
                 while total_chars > self.LM_MAX_TOTAL_CHARS and len(messages) > 2:
-                    removed = messages.pop(1)  # после system_message
+                    removed = messages.pop(1)
                     self.logger.warning(f"Removed old history message to fit LM payload: {removed}")
                     total_chars = sum(len(m["content"]) for m in messages)
                 if total_chars > self.LM_MAX_TOTAL_CHARS:
@@ -674,26 +626,18 @@ class LMStudioClient:
                     last["content"] = last["content"][:max(0, len(last["content"]) - (total_chars - self.LM_MAX_TOTAL_CHARS))]
         return messages
 
-    def generate_content(
-        self,
-        prompt_template: str,
-        topic: str,
-        context: str,
-        media_file: Optional[str] = None,
-        max_tokens: Optional[int] = None
-    ) -> str:
-        """
-        Генерирует текст с помощью LM Studio, ограничивает весь payload до LM_MAX_TOTAL_CHARS.
-        Возвращает строку или бросает ValueError.
-        """
-        max_tokens = max_tokens or self.max_tokens
-        messages = self._build_messages(prompt_template, topic, context, media_file)
+    def _request_shorter_content(self, prompt_template: str, topic: str, context: str, current_length: int) -> str:
+        shorter_prompt = f"{prompt_template}\n\nВАЖНО: Твой предыдущий ответ был слишком длинный ({current_length} символов). Напиши более коротко, сохрани смысл и структуру."
+        messages = self._build_messages(shorter_prompt, topic, context)
+        return self._make_request(messages)
+
+    def _make_request(self, messages: List[Dict[str, str]]) -> str:
         chat_url = f"{self.base_url}/v1/chat/completions"
         payload_chat = {
             "model": self.model,
             "messages": messages,
             "temperature": self.temperature,
-            "max_tokens": max_tokens
+            "max_tokens": self.max_tokens
         }
         if self.top_p is not None:
             payload_chat["top_p"] = self.top_p
@@ -704,115 +648,153 @@ class LMStudioClient:
 
         try:
             response = requests.post(chat_url, json=payload_chat, timeout=self.timeout)
-            self.logger.debug(f"LMStudioClient: raw response: {response.text[:1000]}")
-            response.raise_for_status()
-            try:
-                result = response.json()
-            except Exception as e:
-                self.logger.error("Failed to decode LM Studio response as JSON", exc_info=True)
-                result = {}
-            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        except Exception as e:
+            self.logger.error(f"Error during POST to LM Studio: {e}")
+            return ""
+        if not response.ok:
+            self.logger.error(f"LM Studio response HTTP error: {response.status_code} {response.text[:200]}")
+            return ""
+        self.logger.debug(f"LMStudioClient: raw response: {response.text[:1000]}")
+        try:
+            result = response.json()
+        except Exception as e:
+            self.logger.error("Failed to decode LM Studio response as JSON", exc_info=True)
+            result = {}
+        
+        text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # Fallback если пусто или endpoint не поддержан
-            if not text:
-                self.logger.warning("Empty chat response, fallback to completions endpoint.")
-                comp_url = f"{self.base_url}/v1/completions"
-                payload = {
-                    "model": self.model,
-                    "prompt": messages[-1]['content'],
-                    "max_tokens": max_tokens,
-                    "temperature": self.temperature,
-                    "stream": False
-                }
-                if self.top_p is not None:
-                    payload["top_p"] = self.top_p
-                if self.top_k is not None:
-                    payload["top_k"] = self.top_k
+        if not text:
+            self.logger.warning("Empty chat response, fallback to completions endpoint.")
+            comp_url = f"{self.base_url}/v1/completions"
+            payload = {
+                "model": self.model,
+                "prompt": messages[-1]['content'],
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "stream": False
+            }
+            if self.top_p is not None:
+                payload["top_p"] = self.top_p
+            if self.top_k is not None:
+                payload["top_k"] = self.top_k
+            try:
                 comp_resp = requests.post(comp_url, json=payload, timeout=self.timeout)
                 comp_resp.raise_for_status()
-                try:
-                    comp_result = comp_resp.json()
-                except Exception as e:
-                    self.logger.error("Failed to decode completions response as JSON", exc_info=True)
-                    comp_result = {}
+                comp_result = comp_resp.json()
                 text = comp_result.get("choices", [{}])[0].get("text", "")
+            except Exception as e:
+                self.logger.error(f"Failed to get completion from fallback endpoint: {e}")
+                text = ""
+        if not isinstance(text, str):
+            raise ValueError("LM Studio returned non-string result.")
+        return text.strip()
 
-            if text and text.strip():
-                self.add_to_history(messages[-1]['content'], text)
-            else:
-                self.logger.warning("LM Studio returned empty text from both endpoints.")
-            if not isinstance(text, str):
-                raise ValueError("LM Studio returned non-string result.")
-            return text.strip()
+    def _save_lm_log(self, text: str, topic: str, success: bool, prompt: Optional[str] = None, attempt: int = 0):
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_topic = "".join(c for c in topic if c.isalnum() or c in (' ', '_')).rstrip().replace(' ', '_')
+        folder = self.log_dir_success if success else self.log_dir_failed
+        filename = f"{date_str}_attempt{attempt}_{safe_topic[:40]}.txt"
+        try:
+            with open(os.path.join(folder, filename), "w", encoding="utf-8") as f:
+                f.write(text)
         except Exception as e:
-            self.logger.error("Content generation failed on both endpoints", exc_info=True)
-            self.clear_conversation_history()
-            raise ValueError(f"LM Studio content generation failed: {e}")
+            self.logger.error(f"Failed to save LM log: {e}")
+        if prompt:
+            try:
+                with open(os.path.join(self.log_dir_prompts, f"{date_str}_attempt{attempt}_{safe_topic[:40]}_prompt.txt"), "w", encoding="utf-8") as f:
+                    f.write(prompt)
+            except Exception as e:
+                self.logger.error(f"Failed to save LM prompt log: {e}")
 
-    def generate_with_retry(
-        self,
-        prompt_template: str,
-        topic: str,
-        context: str,
-        media_file: Optional[str] = None,
-        max_retries: int = 3
-    ) -> str:
-        """
-        Автоматический повтор генерации при ошибках, с учётом лимита на payload.
-        При ошибке 400 — уменьшает context и очищает историю.
-        """
+    def generate_content(self, prompt_template: str, topic: str, context: str, max_tokens: Optional[int] = None) -> str:
+        max_tokens = max_tokens or self.max_tokens
+        original_max_tokens = self.max_tokens
+        self.max_tokens = max_tokens
+        text = ""
+        last_prompt = ""
+        try:
+            messages = self._build_messages(prompt_template, topic, context)
+            last_prompt = messages[-1]['content'] if messages else ""
+            text = self._make_request(messages)
+            self._save_lm_log(text, topic, False, last_prompt, attempt=0)
+            if not text or not text.strip():
+                self.logger.warning("LM Studio returned empty text from both endpoints.")
+                return ""
+
+            if len(text) > self.TELEGRAM_LIMIT:
+                self.logger.warning(f"Generated content too long ({len(text)} chars), requesting shorter version")
+                attempts = 0
+                max_attempts = 3
+                while len(text) > self.TELEGRAM_LIMIT and attempts < max_attempts:
+                    attempts += 1
+                    self.logger.info(f"Attempt {attempts} to get shorter content")
+                    # Очищаем историю для предотвращения накопления длинных и коротких версий
+                    self.clear_conversation_history()
+                    try:
+                        shorter_prompt = f"{prompt_template}\n\nВАЖНО: Твой предыдущий ответ был слишком длинный ({len(text)} символов). Напиши более коротко, сохрани смысл и структуру."
+                        messages = self._build_messages(shorter_prompt, topic, context)
+                        last_prompt = messages[-1]['content'] if messages else ""
+                        text = self._make_request(messages)
+                        self._save_lm_log(text, topic, False, last_prompt, attempt=attempts)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to get shorter content on attempt {attempts}: {e}")
+                        if attempts == max_attempts:
+                            self.logger.warning("Max attempts reached, truncating content")
+                            text = text[:self.TELEGRAM_LIMIT-10] + "..."
+                            break
+                if len(text) <= self.TELEGRAM_LIMIT:
+                    self.logger.info(f"Successfully got shorter content ({len(text)} chars)")
+
+            # Логируем успешный результат в success, только если текст валидный и короткий
+            if text and text.strip() and len(text) <= self.TELEGRAM_LIMIT:
+                self._save_lm_log(text, topic, True, last_prompt, attempt=99)
+                # В историю только финальный вариант
+                self.add_to_history(last_prompt, text)
+            else:
+                self.logger.warning("Generated content is too long or empty, not saving to success log.")
+
+            return text.strip() if text else ""
+        finally:
+            self.max_tokens = original_max_tokens
+
+    def generate_with_retry(self, prompt_template: str, topic: str, context: str, max_retries: int = 3) -> str:
         last_err = None
         original_context = context
+        final_text = ""
         for attempt in range(1, max_retries + 1):
             try:
                 self.logger.debug(f"LMStudioClient: generation attempt {attempt}/{max_retries}")
-                text = self.generate_content(prompt_template, topic, context, media_file)
-                if text and text.strip():
-                    return text
-                self.logger.warning(f"LM Studio generation returned empty text (attempt {attempt})")
+                text = self.generate_content(prompt_template, topic, context)
+                if text and text.strip() and len(text) <= self.TELEGRAM_LIMIT:
+                    final_text = text
+                    break
+                self.logger.warning(f"LM Studio generation returned empty or too long text (attempt {attempt})")
             except Exception as e:
                 last_err = e
                 msg = str(e)
                 self.logger.warning(f"LMStudioClient: error on attempt {attempt}: {msg}")
-                # Если payload слишком большой — сокращаем context
                 if "413" in msg or "400" in msg or "payload" in msg:
                     context = context[:max(100, len(context) // 2)]
                     self.logger.warning("Reducing context and retrying...")
-                # При повторяющейся ошибке — сбрасываем историю
                 if attempt == max_retries or (self.history_limit and len(self.history) > self.history_limit * 4):
                     self.logger.warning("Clearing conversation history due to repeated failures.")
                     self.clear_conversation_history()
-        # Последняя попытка — с минимальным context и чистой историей
-        try:
-            return self.generate_content(prompt_template, topic, original_context[:256], media_file)
-        except Exception as e:
-            self.logger.error("Final fallback attempt failed", exc_info=True)
-            raise ValueError(f"LM Studio did not generate content after {max_retries} attempts: {last_err}")
+        # Если ни одна попытка не прошла, делаем финальный fallback
+        if not final_text:
+            try:
+                text = self.generate_content(prompt_template, topic, original_context[:256])
+                if text and text.strip() and len(text) <= self.TELEGRAM_LIMIT:
+                    final_text = text
+            except Exception as e:
+                self.logger.error("Final fallback attempt failed", exc_info=True)
+                raise ValueError(f"LM Studio did not generate content after {max_retries} attempts: {last_err}")
+        # В любом случае, возвращаем только последний валидный текст
+        return final_text.strip() if final_text else ""
 
-    def set_generation_parameters(self, temperature: float, top_p: Optional[float] = None, top_k: Optional[int] = None):
-        assert 0.0 <= temperature <= 2.0, "temperature must be in [0,2]"
-        self.temperature = temperature
-        if top_p is not None:
-            assert 0.0 <= top_p <= 1.0, "top_p must be in [0,1]"
-            self.top_p = top_p
-        if top_k is not None:
-            assert isinstance(top_k, int) and top_k >= 0, "top_k must be non-negative int"
-            self.top_k = top_k
-        self.logger.info(f"Set generation parameters: temperature={temperature}, top_p={top_p}, top_k={top_k}")
 
-    def get_generation_stats(self) -> dict:
-        return {
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
-            "timeout": self.timeout,
-            "history_limit": self.history_limit,
-            "system_message": self.system_message,
-            "top_p": self.top_p,
-            "top_k": self.top_k
-        }
+
 
 # участок кода файла prompt_builder.py
-
 import os
 import random
 import logging
@@ -821,25 +803,17 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 
 class PromptBuilder:
-    """
-    Сборка промпта из шаблонов с жестким контролем структуры, подстановки плейсхолдеров,
-    и надежным возвратом данных для всей цепочки генерации.
-    """
-
     REQUIRED_PLACEHOLDERS = ["{TOPIC}", "{CONTEXT}"]
-    OPTIONAL_PLACEHOLDERS = ["{UPLOADFILE}"]
     PLACEHOLDER_PATTERN = re.compile(r"\{[A-Z_]+\}")
 
     def __init__(self, prompt_folders: List[str]):
         self.prompt_folders = [Path(folder) for folder in prompt_folders]
         self.logger = logging.getLogger("PromptBuilder")
         self.templates: Dict[str, List[str]] = {}
-        self.error_history: List[Dict] = []
         self._last_prompt_template: Optional[str] = None
         self.load_prompt_templates()
 
     def load_prompt_templates(self) -> None:
-        """Загружает шаблоны из всех указанных папок, сохраняет пути."""
         for folder in self.prompt_folders:
             if not folder.exists():
                 self.logger.warning(f"Prompt folder does not exist: {folder}")
@@ -852,7 +826,6 @@ class PromptBuilder:
         return [str(p) for p in folder_path.glob("*.txt")]
 
     def _select_random_templates(self) -> List[str]:
-        """Из каждой папки выбирает случайный шаблон. Если нет файлов — None."""
         selected = []
         for folder in self.prompt_folders:
             templates = self.templates.get(str(folder), [])
@@ -867,24 +840,18 @@ class PromptBuilder:
                 return f.read()
         except Exception as e:
             msg = f"Failed to read prompt file: {file_path}"
-            self._log_error(msg, exc=e)
+            self.logger.error(msg, exc_info=True)
             return ""
 
     def _validate_prompt_structure(self, template: str) -> None:
-        """Проверяет наличие всех обязательных плейсхолдеров. Кидает ошибку если невалидно."""
         missing = [ph for ph in self.REQUIRED_PLACEHOLDERS if ph not in template]
         if missing:
-            msg = f"Prompt missing required placeholders: {missing}"
-            self._log_error(msg)
-            self.logger.error(msg)
-            raise ValueError(msg)
-        # Логируем дубли, не валим работу
-        for ph in self.REQUIRED_PLACEHOLDERS + self.OPTIONAL_PLACEHOLDERS:
+            raise ValueError(f"Prompt missing required placeholders: {missing}")
+        for ph in self.REQUIRED_PLACEHOLDERS:
             if ph * 2 in template:
                 self.logger.warning(f"Prompt contains duplicated placeholder: {ph}{ph}")
-        # Проверка на неизвестные плейсхолдеры
         all_placeholders = set(self.PLACEHOLDER_PATTERN.findall(template))
-        supported = set(self.REQUIRED_PLACEHOLDERS + self.OPTIONAL_PLACEHOLDERS)
+        supported = set(self.REQUIRED_PLACEHOLDERS)
         unsupported = [ph for ph in all_placeholders if ph not in supported]
         if unsupported:
             self.logger.warning(f"Prompt contains unsupported placeholders: {unsupported}")
@@ -892,45 +859,19 @@ class PromptBuilder:
     def _find_unresolved_placeholders(self, text: str) -> List[str]:
         return list(set(self.PLACEHOLDER_PATTERN.findall(text)))
 
-    def _compact_whitespace(self, text: str) -> str:
-        return re.sub(r"\n{3,}", "\n\n", text)
-
     def _replace_placeholders(self, template: str, replacements: Dict[str, str]) -> str:
         for key, value in replacements.items():
             template = template.replace(key, value)
         return template
 
-    def _has_uploadfile_placeholder(self, template: str) -> bool:
-        return "{UPLOADFILE}" in template
-
-    def build_prompt(
-        self,
-        topic: str,
-        context: str,
-        media_file: Optional[str] = None
-    ) -> Tuple[str, bool, str]:
-        """
-        Возвращает:
-            - prompt (str): итоговый текст промпта без неразрешённых плейсхолдеров
-            - has_uploadfile (bool): True, если в шаблоне был {UPLOADFILE} и он был заменён
-            - prompt_template (str): оригинальный текст шаблона (до подстановки)
-        """
-        # 1. Проверка входных данных
+    def build_prompt(self, topic: str, context: str) -> Tuple[str, str]:
         if not topic or not isinstance(topic, str):
-            msg = "Topic for prompt_builder is empty or not a string."
-            self._log_error(msg, context={"topic": topic})
-            self.logger.error(msg)
-            raise ValueError(msg)
+            raise ValueError("Topic for prompt_builder is empty or not a string.")
         if not context or not isinstance(context, str):
-            msg = "Context for prompt_builder is empty or not a string."
-            self._log_error(msg, context={"context": context})
-            self.logger.error(msg)
-            raise ValueError(msg)
+            raise ValueError("Context for prompt_builder is empty or not a string.")
 
-        # 2. Выбор шаблонов
         template_paths = self._select_random_templates()
         template_texts = [self._read_template_file(path) for path in template_paths if path]
-        # Если все шаблоны пусты — дефолт
         if not any(template_texts):
             prompt_template = self._default_template()
             self.logger.warning("No prompt templates found, using default.")
@@ -938,68 +879,20 @@ class PromptBuilder:
             prompt_template = "\n\n".join(filter(None, template_texts)).strip()
 
         self._last_prompt_template = prompt_template
-
-        # 3. Проверка структуры ДО подстановки
         self._validate_prompt_structure(prompt_template)
 
-        # 4. Определяем, нужен ли uploadfile
-        has_uploadfile = self._has_uploadfile_placeholder(prompt_template)
         replacements = {
             "{TOPIC}": topic.strip(),
             "{CONTEXT}": context.strip(),
-            "{UPLOADFILE}": media_file.strip() if (has_uploadfile and media_file) else "",
         }
         prompt = self._replace_placeholders(prompt_template, replacements)
 
-        # 5. Проверка после подстановки: не осталось ли плейсхолдеров
         unresolved = self._find_unresolved_placeholders(prompt)
-        critical_unresolved = [
-            ph for ph in unresolved if
-            ph in self.REQUIRED_PLACEHOLDERS or
-            (ph == "{UPLOADFILE}" and has_uploadfile)
-        ]
+        critical_unresolved = [ph for ph in unresolved if ph in self.REQUIRED_PLACEHOLDERS]
         if critical_unresolved:
-            msg = f"Prompt contains unresolved placeholders after replacement: {critical_unresolved}"
-            self._log_error(msg, context={"prompt": prompt, "replacements": replacements})
-            self.logger.error(msg)
-            raise ValueError(msg)
+            raise ValueError(f"Prompt contains unresolved placeholders after replacement: {critical_unresolved}")
 
-        # 6. Очистка whitespace
-        prompt = self._compact_whitespace(prompt)
-
-        self.logger.debug(
-            f"PromptBuilder: topic='{topic[:100]}', context_len={len(context)}, media_file='{media_file}', has_uploadfile={has_uploadfile}")
-        self.logger.debug(f"PromptBuilder: template_paths={template_paths}")
-        self.logger.debug(f"PromptBuilder: prompt after replacement (truncated): {prompt[:1000]}")
-
-        return prompt, has_uploadfile, prompt_template
-
-    def _log_error(self, msg: str, context: Optional[dict] = None, exc: Exception = None):
-        entry = {
-            "message": msg,
-            "context": context,
-            "exception": repr(exc) if exc else None
-        }
-        self.error_history.append(entry)
-        if len(self.error_history) > 100:
-            self.error_history = self.error_history[-100:]
-
-    def get_error_history(self) -> List[Dict]:
-        return self.error_history.copy()
-
-    def check_placeholder_presence(self, template: str) -> Dict[str, bool]:
-        all_ph = self.REQUIRED_PLACEHOLDERS + self.OPTIONAL_PLACEHOLDERS
-        return {ph: (ph in template) for ph in all_ph}
-
-    def get_template_stats(self) -> Dict[str, int]:
-        return {folder: len(templates) for folder, templates in self.templates.items()}
-
-    def reload_templates(self) -> None:
-        self.logger.info("Reloading prompt templates...")
-        self.load_prompt_templates()
-
-    def test_template_combination(self, topic: str, context: str) -> Tuple[str, bool, str]:
-        return self.build_prompt(topic, context, media_file="media/sample.jpg")
+        return prompt, prompt_template
 
     def _default_template(self) -> str:
         return (
@@ -1007,10 +900,127 @@ class PromptBuilder:
             "Работал в крупных автопарках, ремонтировал краны, фургоны, бортовые машины. "
             "Знаешь все подводные камни эксплуатации. Говоришь простым языком, приводишь примеры из практики.\n\n"
             "Тема: {TOPIC}\n\n"
-            "Контекст для анализа: {CONTEXT}\n"
-            "{UPLOADFILE}"
+            "Контекст для анализа: {CONTEXT}"
         )
 
-    @property
-    def last_prompt_template(self) -> Optional[str]:
-        return self._last_prompt_template
+
+
+
+# участок файла config.json
+
+{
+    "version": "1.0.0",
+    "environment": "production",
+    "telegram": {
+        "bot_token_file": "config/telegram_token.txt",
+        "channel_id_file": "config/telegram_channel.txt",
+        "retry_attempts": 3,
+        "retry_delay": 3.0,
+        "enable_preview": true,
+        "max_caption_length": 1024,
+        "post_interval": 10,
+        "max_retries": 3
+    },
+    "language_model": {
+        "url": "http://localhost:1234/v1/chat/completions",
+        "model_name": "qwen3-14b",
+        "max_tokens": 4096,
+        "max_chars": 20000,
+        "temperature": 0.7,
+        "timeout": 1500,
+        "history_limit": 3,
+        "system_message": "Вы — эксперт по бровям и ресницам.",
+        "max_chars_with_media": 4096
+    },
+    "lm_studio": {
+        "base_url": "http://localhost:1234",
+        "model": "qwen/qwen3-14b",
+        "max_tokens": 4096,
+        "max_chars": 20000,
+        "temperature": 0.7,
+        "timeout": 1500,
+        "history_limit": 3,
+        "system_message": "Вы — эксперт по бровям и ресницам.",
+        "max_chars_with_media": 4096
+    },
+    "retrieval": {
+        "chunk_size": 500,
+        "overlap": 100,
+        "top_k_title": 2,
+        "top_k_faiss": 8,
+        "top_k_final": 3,
+        "embedding_model": "all-MiniLM-L6-v2",
+        "cross_encoder": "cross-encoder/stsb-roberta-large"
+    },
+    "rag": {
+        "chunk_size": 500,
+        "chunk_overlap": 100,
+        "top_k_title": 2,
+        "top_k_faiss": 8,
+        "top_k_final": 3,
+        "embedding_model": "all-MiniLM-L6-v2",
+        "cross_encoder": "cross-encoder/stsb-roberta-large",
+        "max_context_length": 4096,
+        "media_context_length": 1024,
+        "similarity_threshold": 0.7
+    },
+    "system": {
+        "chunk_usage_limit": 10,
+        "usage_reset_days": 7,
+        "diversity_boost": 0.3,
+        "max_retries": 3,
+        "backoff_factor": 1.5
+    },
+    "paths": {
+        "data_dir": "data",
+        "log_dir": "logs",
+        "inform_dir": "inform",
+        "media_dir": "media",
+        "index_file": "data/faiss_index.idx",
+        "context_file": "data/faiss_contexts.json",
+        "usage_stats_file": "data/usage_statistics.json",
+        "processed_topics_file": "data/state.json",
+        "prompt_folders": [
+            "data/prompt_1",
+            "data/prompt_2",
+            "data/prompt_3"
+        ]
+    },
+    "temp_files": {
+        "cleanup_interval_hours": 24,
+        "max_size_mb": 1000,
+        "min_free_space_mb": 500
+    },
+    "logging": {
+        "level": "INFO",
+        "file_max_mb": 5,
+        "backup_count": 3
+    },
+    "content_validator": {
+        "remove_tables": true,
+        "max_length_no_media": 4096,
+        "max_length_with_media": 1024
+    },
+    "schedule": {
+        "interval_seconds": 900
+    },
+    "external_apis": {
+        "serper_api_key_file": "config/serper_api_key.txt",
+        "serper_endpoint": "https://google.serper.dev/search",
+        "serper_results_limit": 10
+    },
+    "serper": {
+        "api_key_file": "config/serper_api_key.txt",
+        "endpoint": "https://google.serper.dev/search",
+        "results_limit": 10
+    },
+    "processing": {
+        "max_tasks_per_run": 1,
+        "max_errors": 5,
+        "error_backoff_sec": 30,
+        "max_processing_time_sec": 300,
+        "shutdown_on_critical": true,
+        "batch_size": 1,
+        "max_file_size_mb": 100
+    }
+}
